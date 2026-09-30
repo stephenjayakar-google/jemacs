@@ -194,7 +194,7 @@ export function renderBodyRows(
 }
 
 function decorationSignature(d: RowDecorationModel | null): string {
-  return d ? `\u0002${d.kind}${d.first ? "f" : ""}${d.last ? "l" : ""}|${d.insetPx ?? ""}|${d.insetRightPx ?? ""}|${d.padTopPx ?? ""}|${d.image ? `${d.image.src}@${d.image.widthPx}x${d.image.heightPx}` : ""}` : ""
+  return d ? `\u0002${d.kind}${d.first ? "f" : ""}${d.last ? "l" : ""}|${d.insetPx ?? ""}|${d.insetRightPx ?? ""}|${d.padTopPx ?? ""}|${d.image ? `${d.image.src}@${d.image.widthPx}x${d.image.heightPx}` : ""}|${d.guides ? `${d.guides.startPx},${d.guides.stepPx},${d.guides.count}` : ""}` : ""
 }
 
 /**
@@ -208,6 +208,7 @@ function applyRowDecoration(row: HTMLElement, d: RowDecorationModel | null): voi
     if (style.getPropertyValue?.("--jemacs-row-inset")) style.removeProperty("--jemacs-row-inset")
     if (style.getPropertyValue?.("--jemacs-row-inset-right")) style.removeProperty("--jemacs-row-inset-right")
     if (style.paddingTop) style.paddingTop = ""
+    if (style.backgroundImage) style.backgroundImage = ""
     return
   }
   const classes = row.classList as DOMTokenList
@@ -217,6 +218,22 @@ function applyRowDecoration(row: HTMLElement, d: RowDecorationModel | null): voi
   style.setProperty?.("--jemacs-row-inset", `${d.insetPx ?? 0}px`)
   style.setProperty?.("--jemacs-row-inset-right", `${d.insetRightPx ?? 0}px`)
   style.paddingTop = d.padTopPx ? `${d.padTopPx}px` : ""
+  style.backgroundImage = d.guides ? listGuidesBackground(d.guides) : ""
+}
+
+/**
+ * List nesting guides as background gradients, one 1px line per level. A
+ * background takes no width and no height, so the row keeps the geometry the
+ * kernel wrapped and costed it with; it also runs down every wrapped row of
+ * the item, so the guide is unbroken.
+ */
+function listGuidesBackground(g: NonNullable<RowDecorationModel["guides"]>): string {
+  const out: string[] = []
+  for (let i = 0; i < g.count; i++) {
+    const x = g.startPx + i * g.stepPx
+    out.push(`linear-gradient(to right, transparent ${x}px, color-mix(in srgb, currentColor 22%, transparent) ${x}px, color-mix(in srgb, currentColor 22%, transparent) ${x + 1}px, transparent ${x + 1}px)`)
+  }
+  return out.join(", ")
 }
 
 /**

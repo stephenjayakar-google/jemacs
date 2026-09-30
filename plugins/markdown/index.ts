@@ -107,8 +107,14 @@ function fencedCodeBlocksFor(buffer: BufferModel): FencedCodeBlock[] {
 }
 /** `markdown-list-item-bullets`: one glyph per nesting depth, cycled. */
 const LIST_ITEM_BULLETS = ["\u25cf", "\u25ce", "\u25cb", "\u25c6", "\u25c7", "\u25ba", "\u2022"] as const
-/** Lighter bullets for a GUI text column, where the markers are drawn faint. */
-const GUI_LIST_ITEM_BULLETS = ["\u2022", "\u25e6", "\u25aa", "\u2022", "\u25e6", "\u25aa"] as const
+/** Bullets for a GUI text column. The glyphs keep the text's font size, so they
+ *  scale with it; `•` is only ~0.2em in SF Pro, too small to read as a marker,
+ *  while `⦁` / `⚬` are ~0.35em and sit at the x-height, like Obsidian's dot. */
+const GUI_LIST_ITEM_BULLETS = ["\u2981", "\u26ac", "\u25aa"] as const
+/** GUI task boxes: `▢` and `✅` both draw about 0.8em high in SF Pro, so an
+ *  open and a done task line up. `☐` / `☑` draw at two different sizes there. */
+const GUI_CHECKBOX_OPEN = "\u25a2"
+const GUI_CHECKBOX_DONE = "\u2705"
 /** First entry of `markdown-blockquote-display-char` ("\u258c" "\u2503" ">"). */
 const BLOCKQUOTE_DISPLAY_CHAR = "\u258c"
 const URL_COMPOSE_CHAR = "↪"
@@ -230,11 +236,38 @@ function markdownPixelDisplay(buffer: BufferModel): boolean {
 }
 
 /**
+ * Nesting depth of each list item line (0 = top level), or undefined for a
+ * line that is not a list item. Depth comes from the stack of open parent
+ * indents, as CommonMark nests items, so a 4-space or a tab indent is one
+ * level -- not two, as a fixed 2-column step would count it. A non-blank line
+ * at column 0 that is not an item ends the list.
+ */
+function markdownListDepths(lines: readonly string[]): Array<number | undefined> {
+  const depths: Array<number | undefined> = new Array(lines.length)
+  const open: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    const item = /^(\s*)([-*+]|\d+[.)])\s+/.exec(line)
+    if (!item) {
+      if (line.trim() && !/^\s/.test(line)) open.length = 0
+      continue
+    }
+    const indent = item[1]!.replace(/\t/g, "    ").length
+    while (open.length && open[open.length - 1]! >= indent) open.pop()
+    depths[i] = open.length
+    open.push(indent)
+  }
+  return depths
+}
+
+/**
  * Row kind of each source line, for GUI row decorations: headings get space
  * above, code gets a panel, quotes a left rule, `---` a rule, front matter a
- * muted block. Plain paragraphs have no kind.
+ * muted block, a list item `list-<depth>` (its indent and nesting guides).
+ * Plain paragraphs have no kind.
  */
 function markdownLineKinds(lines: readonly string[], blocks: readonly FencedCodeBlock[]): Array<string | undefined> {
+  const listDepths = markdownListDepths(lines)
   const kinds: Array<string | undefined> = new Array(lines.length)
   const metadataEnd = markdownFrontMatterEnd(lines)
   for (let i = 0; i <= metadataEnd; i++) kinds[i] = "frontmatter"
@@ -250,6 +283,7 @@ function markdownLineKinds(lines: readonly string[], blocks: readonly FencedCode
     if (atx) kinds[i] = `heading-${atx[1]!.length}`
     else if (/^(\s*)([-*_])\2{2,}\s*$/.test(line) && !(SETEXT_UNDERLINE_RE.test(line) && i > 0 && lines[i - 1]!.trim() && !kinds[i - 1])) kinds[i] = "hr"
     else if (/^\s*>/.test(line)) kinds[i] = "quote"
+    else if (listDepths[i] != null && !(SETEXT_UNDERLINE_RE.test(line) && i > 0 && lines[i - 1]!.trim() && !kinds[i - 1])) kinds[i] = `list-${listDepths[i]}`
     else if (line.trim() && i + 1 < lines.length) {
       const setext = SETEXT_UNDERLINE_RE.exec(lines[i + 1]!)
       if (setext) {
@@ -886,6 +920,7 @@ function collectMarkupHides(text: string, hideUrls: boolean, gfm = false, ruleWi
   for (const block of blocks) {
     if (block.bodyEnd > block.bodyStart) codeBodyRanges.push([block.bodyStart, block.bodyEnd])
   }
+  const listDepths = pixel ? markdownListDepths(lines) : undefined
 
   const metadataEnd = markdownFrontMatterEnd(lines)
   for (let lineIdx = metadataEnd + 1; lineIdx < lines.length; lineIdx++) {
@@ -925,10 +960,14 @@ function collectMarkupHides(text: string, hideUrls: boolean, gfm = false, ruleWi
     if (list) {
       const markerStart = lineStart + list[1]!.length
       const markerEnd = lineStart + list[0]!.length
+      // A GUI indents a list item by its row inset (`list-<depth>` row kind),
+      // in ems of the body font, so the source indent goes: a tab or four
+      // spaces is one nesting level, not a run of proportional spaces.
+      if (pixel) pushMarkupHide(ops, lineStart, markerStart, [])
       // `markdown-list-item-bullets` cycles by nesting depth, so a nested item
       // does not repeat its parent's glyph. Depth follows the leading indent at
       // `markdown-list-indent-width` (2) columns per level, as Emacs computes it.
-      const depth = Math.floor(list[1]!.replace(/\t/g, "  ").length / 2)
+      const depth = listDepths?.[lineIdx] ?? Math.floor(list[1]!.replace(/\t/g, "  ").length / 2)
       const bullets = pixel ? GUI_LIST_ITEM_BULLETS : LIST_ITEM_BULLETS
       const bullet = /^\d/.test(list[2]!)
         ? `${list[2]} `
@@ -939,7 +978,7 @@ function collectMarkupHides(text: string, hideUrls: boolean, gfm = false, ruleWi
       // and `markdown-toggle-gfm-checkbox` still finds it.
       const box = pixel ? /^\[([ xX])\](?=\s|$)/.exec(line.slice(list[0]!.length)) : null
       pushMarkupHide(ops, markerStart, markerEnd, [], box && !/^\d/.test(list[2]!) ? "" : bullet)
-      if (box) pushMarkupHide(ops, markerEnd, markerEnd + 3, [], box[1] === " " ? "\u2610" : "\u2611")
+      if (box) pushMarkupHide(ops, markerEnd, markerEnd + 3, [], box[1] === " " ? GUI_CHECKBOX_OPEN : GUI_CHECKBOX_DONE)
     }
 
     // The backreference must repeat the rule character (group 2), not the

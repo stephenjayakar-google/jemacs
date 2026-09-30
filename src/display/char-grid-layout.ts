@@ -487,6 +487,7 @@ function rowDecorationsFor(
       ...(d.insetPx ? { insetPx: d.insetPx } : {}),
       ...(d.insetRightPx ? { insetRightPx: d.insetRightPx } : {}),
       ...(d.padTopPx && first ? { padTopPx: d.padTopPx } : {}),
+      ...(d.guides ? { guides: d.guides } : {}),
       ...(last && image ? { image: { src: image.src, ...imageBox(pixel, image) } } : {}),
     }
   })

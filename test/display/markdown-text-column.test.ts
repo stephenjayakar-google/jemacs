@@ -67,9 +67,39 @@ test("GUI text column: rows carry kinds and CSS draws the rule and quote bar", (
   expect(at("hr")).toBe("")
   expect(kinds).toContain("code-fence-open")
   expect(kinds).toContain("code")
-  expect(rows.some(r => r.includes("\u2610 todo"))).toBe(true)
+  expect(rows.some(r => r.includes("\u25a2 todo"))).toBe(true)
+  expect(kinds[rows.findIndex(r => r.includes("\u25a2 todo"))]).toBe("list-0")
   // Space above the heading is part of the row geometry the kernel costs.
   expect(pane!.rowDecorations![kinds.indexOf("heading-1")]!.padTopPx).toBeGreaterThan(0)
+})
+
+test("GUI list items: indent and nesting guides are in ems of the body font, so they scale with it", () => {
+  resetFace("default")
+  const editor = makeEditor()
+  install(editor)
+  const buffer = editor.scratch("list.md", "- top\n\t- child\n        - grandchild\n- [ ] task\n", "markdown")
+  buffer.locals.set("markdown-hide-markup", true)
+  buffer.point = 0
+  const decorations = (scale: number) => {
+    buffer.locals.set("text-scale-mode-amount", scale)
+    const model = buildDisplayModel(editor, { lastMessage: "", viewport: { rows: 60, cols: 100 }, hostCapabilities: gui() })
+    const pane = model.windows.kind === "leaf" ? model.windows.pane : null
+    return { rows: themedTextPlain(pane!.body).split("\n"), decorations: pane!.rowDecorations! }
+  }
+  const base = decorations(0)
+  // A tab and 8 spaces are one nesting level each (CommonMark), and the source
+  // indent is hidden: the row inset draws it.
+  expect(base.decorations.slice(0, 4).map(d => d?.kind)).toEqual(["list-0", "list-1", "list-2", "list-0"])
+  expect(base.rows[1]).toBe("\u26ac child")
+  const [top, child, grandchild] = base.decorations as NonNullable<typeof base.decorations[number]>[]
+  expect(child!.insetPx! - top!.insetPx!).toBe(grandchild!.insetPx! - child!.insetPx!)
+  expect(top!.guides).toBeUndefined()
+  expect(grandchild!.guides!.count).toBe(2)
+  // Twice the text scale steps doubles the inset, the guide step and the font.
+  const zoomed = decorations(4).decorations as typeof base.decorations
+  const ratio = 1.2 ** 4
+  expect(zoomed[1]!.insetPx! / child!.insetPx!).toBeCloseTo(ratio, 1)
+  expect(zoomed[2]!.guides!.stepPx / grandchild!.guides!.stepPx).toBeCloseTo(ratio, 1)
 })
 
 test("TUI keeps the glyph rule, quote bar and bullets", () => {

@@ -3,7 +3,7 @@ import { getCustom } from "../runtime/custom"
 import { modeFeature } from "../modes/mode"
 import { sameChunkStyle, type ThemedChunk, type ThemedText } from "./themed-text"
 import { gutterPrefixLen } from "./click-to-point"
-import { adaptivePrefixLen, chunkWidths, padSpaceWidth, wrapLinePx, type DisplayImage, type PixelWrapLayout } from "./pixel-wrap"
+import { adaptivePrefixLen, chunkWidths, padSpaceWidth, prefixPadSpaces, wrapLinePx, type DisplayImage, type PixelWrapLayout } from "./pixel-wrap"
 
 const MARKDOWN_FILL_COLUMN = "markdown-fill-column"
 const MARKDOWN_VISUAL_FILL = "markdown-visual-fill-column-mode"
@@ -259,9 +259,12 @@ export function wrapBodyRowsWithMap(
     // (`adaptivePrefixLen` knows the display bullets and checkbox glyphs), so
     // a wrapped list item indents its continuation rows under its text.
     const body = text.slice(padLen).replace(/^[\u2588\u200b]/, "")
-    const extraPad = adaptiveWrap ? (pixel ? adaptivePrefixLen(body) : adaptiveWrapPrefixLen(body)) : 0
+    const widths = pixel ? chunkWidths(chunksFromStyledChars(row), pixel) : undefined
+    const extraPad = !adaptiveWrap ? 0
+      : pixel ? prefixPadSpaces(widths!, text.length - body.length, adaptivePrefixLen(body), padPx)
+      : adaptiveWrapPrefixLen(body)
     const ranges = pixel
-      ? wrapLinePx(row.map(c => c.ch), chunkWidths(chunksFromStyledChars(row), pixel), Math.max(pixel.columnPx / 4, pixel.columnPx - (pixel.lineInsetPx?.(line) ?? 0)), wordWrap, extraPad * padPx)
+      ? wrapLinePx(row.map(c => c.ch), widths!, Math.max(pixel.columnPx / 4, pixel.columnPx - (pixel.lineInsetPx?.(line) ?? 0)), wordWrap, extraPad * padPx)
       : wrapPlainLine(text, cols!, padLen, wordWrap, extraPad)
     for (const [start, end] of ranges) {
       const continuation = map.length > 0 && map[map.length - 1]!.line === line

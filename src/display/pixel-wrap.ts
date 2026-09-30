@@ -77,7 +77,11 @@ export function imageBlockPx(layout: Pick<PixelWrapLayout, "columnPx">, image: D
   return imageBox(layout, image).heightPx + IMAGE_GAP_PX * 2
 }
 
-export type RowDecoration = { insetPx: number; insetRightPx: number; padTopPx: number }
+/** Vertical nesting guides in a row's inset: `count` 1px lines, the first at
+ *  `startPx` from the row's left edge, then every `stepPx`. */
+export type RowGuides = { startPx: number; stepPx: number; count: number }
+
+export type RowDecoration = { insetPx: number; insetRightPx: number; padTopPx: number; guides?: RowGuides }
 
 const NO_DECORATION: RowDecoration = { insetPx: 0, insetRightPx: 0, padTopPx: 0 }
 
@@ -91,8 +95,16 @@ export const PIXEL_DISPLAY_LOCAL = "jemacs--pixel-display"
 /** Space between a quote's rule and its text, and a code panel's padding. */
 const QUOTE_INSET_PX = 18
 const CODE_INSET_PX = 14
+/** List geometry in ems of the body font, so it grows with text scale:
+ *  top-level items sit this far in from the paragraph edge (Obsidian's list
+ *  margin), and each nesting level steps in by `LIST_STEP_EM`. */
+const LIST_BASE_EM = 1
+const LIST_STEP_EM = 1.75
+/** First GUI list bullet (`GUI_LIST_ITEM_BULLETS` in the markdown plugin): a
+ *  nesting guide runs under the centre of its parent's bullet. */
+const LIST_BULLET = "\u2981"
 
-export function rowDecoration(layout: Pick<PixelWrapLayout, "theme" | "buffer" | "defaults">, kind: string | undefined): RowDecoration {
+export function rowDecoration(layout: Pick<PixelWrapLayout, "theme" | "buffer" | "defaults" | "metrics">, kind: string | undefined): RowDecoration {
   if (!kind) return NO_DECORATION
   if (kind === "quote") return { insetPx: QUOTE_INSET_PX, insetRightPx: 0, padTopPx: 0 }
   if (kind === "code" || kind === "code-fence-open" || kind === "code-fence-close") {
@@ -105,6 +117,18 @@ export function rowDecoration(layout: Pick<PixelWrapLayout, "theme" | "buffer" |
     const face = resolveFace(`markdown-header-face-${heading[1]}` as FaceName, layout.theme, layout.buffer)
     const px = fontSpecFor(styleToChunk(face), layout.defaults).px
     return { insetPx: 0, insetRightPx: 0, padTopPx: Math.round(px * 0.45) }
+  }
+  const list = /^list-(\d+)$/.exec(kind)
+  if (list) {
+    const depth = Number(list[1])
+    const spec = fontSpecFor(styleToChunk(resolveFace("default", layout.theme, layout.buffer)), layout.defaults)
+    const base = Math.round(spec.px * LIST_BASE_EM)
+    const step = Math.round(spec.px * LIST_STEP_EM)
+    const decoration: RowDecoration = { insetPx: base + depth * step, insetRightPx: 0, padTopPx: 0 }
+    if (depth > 0) {
+      decoration.guides = { startPx: base + Math.round(layout.metrics.advance(LIST_BULLET, spec) / 2), stepPx: step, count: depth }
+    }
+    return decoration
   }
   return NO_DECORATION
 }
@@ -252,7 +276,7 @@ function lastBreak(line: ArrayLike<string>, start: number, hardEnd: number): num
 }
 
 /** Characters of a line's adaptive-wrap prefix, as `adaptiveWrapPrefixLen` counts them. */
-const LIST_PREFIX_RE = /^(\s*)(?:(?:[-*+\u25cf\u25ce\u25cb\u25c6\u25c7\u25ba\u2022\u25e6\u25aa]|\d+[.)])\s+(?:[\u2610\u2611]\s+)?|[\u2610\u2611]\s+)/
+const LIST_PREFIX_RE = /^(\s*)(?:(?:[-*+\u25cf\u25ce\u25cb\u25c6\u25c7\u25ba\u2022\u25e6\u25aa\u2981\u26ac]|\d+[.)])\s+(?:[\u2610\u2611\u25a2\u2705]\s+)?|[\u2610\u2611\u25a2\u2705]\s+)/
 const QUOTE_PREFIX_RE = /^(\s*[>\u258c]+\s*)/
 export function adaptivePrefixLen(content: string): number {
   const list = LIST_PREFIX_RE.exec(content)
@@ -260,6 +284,20 @@ export function adaptivePrefixLen(content: string): number {
   const quote = QUOTE_PREFIX_RE.exec(content)
   if (quote) return quote[1]!.length
   return /^\s*/.exec(content)![0].length
+}
+
+/**
+ * Spaces of continuation padding that line a wrapped row up under the text
+ * after a `len`-character prefix starting at `from`. Counted in px, not in
+ * characters: a bullet, a number or a task box is wider than a space in a
+ * proportional font, so one space per prefix character left the second row
+ * short of the first row's text.
+ */
+export function prefixPadSpaces(widths: ArrayLike<number>, from: number, len: number, spacePx: number): number {
+  if (len <= 0 || spacePx <= 0) return Math.max(0, len)
+  let px = 0
+  for (let i = from; i < from + len; i++) px += widths[i] ?? 0
+  return Math.round(px / spacePx)
 }
 
 /** Row ranges of a display line, themed with the spans that overlap it. */
@@ -271,10 +309,11 @@ export function pixelRowRanges(
 ): Array<[number, number]> {
   const chunks = applyTheme(line, lineSpans, layout.theme, { buffer: layout.buffer }).chunks
   const widths = chunkWidths(chunks, layout)
-  const prefix = layout.adaptiveWrap ? adaptivePrefixLen(line) : 0
+  const spacePx = padSpaceWidth(layout)
+  const pad = layout.adaptiveWrap ? prefixPadSpaces(widths, 0, adaptivePrefixLen(line), spacePx) : 0
   const decoration = rowDecoration(layout, kind)
   const capacity = Math.max(layout.columnPx / 4, layout.columnPx - decoration.insetPx - decoration.insetRightPx)
-  return wrapLinePx(line, widths, capacity, layout.wordWrap, prefix * padSpaceWidth(layout))
+  return wrapLinePx(line, widths, capacity, layout.wordWrap, pad * spacePx)
 }
 
 /** Row counts and the extra px above each line, the inputs of the scroll row costs. */

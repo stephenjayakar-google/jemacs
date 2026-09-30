@@ -58,6 +58,9 @@ export type RowDecorationModel = {
   insetPx?: number
   insetRightPx?: number
   padTopPx?: number
+  /** List nesting guides: `count` 1px lines in the inset, the first at
+   *  `startPx` from the row's left edge, then every `stepPx`. */
+  guides?: { startPx: number; stepPx: number; count: number }
   /** Picture drawn under the text of the line's last row, at this px size. */
   image?: { src: string; widthPx: number; heightPx: number }
 }

@@ -72,6 +72,6 @@ test("GUI text column draws an image under its line and task items as bare check
   const image = pane!.rowDecorations![imageRow]!.image!
   expect(image.widthPx / image.heightPx).toBeCloseTo(2, 1)
   expect(image.widthPx).toBeLessThanOrEqual(pane!.textColumn!.widthPx)
-  expect(rows).toContain("\u2610 todo")
-  expect(rows).toContain("\u2022 plain")
+  expect(rows).toContain("\u25a2 todo")
+  expect(rows).toContain("\u2981 plain")
 })
