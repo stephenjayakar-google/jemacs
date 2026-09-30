@@ -4,6 +4,7 @@ import type { BufferModel } from "../kernel/buffer"
 import { findWindowLeaf, type WindowNode } from "../kernel/window"
 import { defcustom, getCustom } from "../runtime/custom"
 import type { HostCapabilities } from "./protocol"
+import type { TextSpan } from "../modes/mode"
 import { tabBarLines } from "./tab-bar"
 import {
   contentAreaLines,
@@ -14,6 +15,8 @@ import {
 } from "./viewport"
 import { displayFilterForBuffer, displayTextForBuffer, paneWrapLayout } from "./display-wrap"
 import { computeLineVisualRows, computeWrappedLineRows, hasNonUnitVisualRows, visibleLineCountForBudget } from "./visual-line-height"
+import { chunkWidths, pixelRowCounts, pixelRowRanges, pixelWrapFor, rowXOffsets, type PixelWrapLayout } from "./pixel-wrap"
+import { applyTheme } from "./theme"
 
 defcustom("next-screen-context-lines", "integer", 2,
   "Lines of overlap left when scrolling by a screenful (C-v / M-v).", "windows")
@@ -210,13 +213,146 @@ function visualRowsForBuffer(editor: Editor, buffer: BufferModel): number[] | un
     start: buffer.lineStarts[startLine] ?? 0,
     end: endLine < buffer.lineCount ? buffer.lineStarts[endLine]! : buffer.text.length,
   })]
+  const pixel = pixelLayoutForBuffer(editor, buffer)
+  // Row costs must use the same wrap as the frame the user sees, or C-v lands
+  // point on a line the next redisplay scrolls away from.
+  const pixelCosts = pixel
+    ? pixelRowCounts(pixel.layout, displayLines, pixel.displaySpans(spans), startLine, Math.min(displayLines.length - 1, endLine), displayFilterForBuffer(buffer)?.lineKinds, displayFilterForBuffer(buffer)?.lineImages)
+    : undefined
   return computeLineVisualRows(buffer.text, spans, editor.theme, buffer, textScaleFactor(buffer), {
     wrapCols: wrapLayout.wrapCols,
     gutterPrefixLen: wrapLayout.gutterPrefixLen,
     wordWrap: wrapLayout.wordWrap,
     adaptiveWrap: wrapLayout.adaptiveWrap,
     displayLines,
+    ...(pixelCosts ? { ...pixelCosts, lineHeight: pixel!.layout.lineHeight } : {}),
   })
+}
+
+/**
+ * The pixel wrap the last redisplay used for `buffer`, or null on character-grid
+ * hosts and buffers that do not use a text column. `displaySpans` maps
+ * buffer-space spans into the display text the wrap measures.
+ */
+function pixelLayoutForBuffer(editor: Editor, buffer: BufferModel): { layout: PixelWrapLayout; displaySpans: (spans: TextSpan[]) => TextSpan[] } | null {
+  const caps = editor.lastHostCapabilities
+  if (!caps?.perFaceFonts || !caps.fontMetrics) return null
+  const cols = buffer.locals.get("window-body-cols") as number | undefined
+  const layout = pixelWrapFor({
+    locals: buffer.locals,
+    cols,
+    showGutter: editor.showLineNumbers(buffer) || editor.gutterDecorations(buffer).length > 0,
+    perFaceFonts: true,
+    metrics: caps.fontMetrics,
+    theme: editor.theme,
+    buffer,
+    textScale: textScaleFactor(buffer),
+  })
+  if (!layout) return null
+  const map = displayView(buffer).map
+  return { layout, displaySpans: spans => spans.map(span => ({ ...span, start: map(span.start), end: map(span.end) })) }
+}
+
+/**
+ * Emacs `line-move-visual` for a pixel-wrapped text column: `C-n`/`C-p` step one
+ * screen row of the frame the user sees, keeping point's horizontal pixel
+ * position as the goal (Emacs keeps a goal in pixels too, `temporary-goal-column`
+ * scaled by the frame's column width).
+ *
+ * Returns false when the buffer is not pixel-wrapped, so the caller falls back
+ * to the character-grid move.
+ */
+export function pixelVisualLineMove(editor: Editor, buffer: BufferModel, delta: number): boolean {
+  if (delta === 0) return true
+  const pixel = pixelLayoutForBuffer(editor, buffer)
+  if (!pixel) return false
+  const view = displayView(buffer)
+  const lines = view.text.split("\n")
+  const lineStarts: number[] = []
+  for (let i = 0, o = 0; i < lines.length; i++) { lineStarts.push(o); o += lines[i]!.length + 1 }
+
+  const geometry = new Map<number, { rows: Array<[number, number]>; xs: number[] }>()
+  const geometryFor = (i: number) => {
+    let g = geometry.get(i)
+    if (g) return g
+    const start = lineStarts[i]!
+    const end = start + lines[i]!.length
+    const bufStart = view.unmap(start)
+    const bufEnd = view.unmap(end)
+    // Font-lock a few lines of context: setext headings, fences and front
+    // matter are recognised from neighbouring lines.
+    const fromLine = Math.max(0, buffer.lineAt(bufStart) - FONT_LOCK_CONTEXT_LINES)
+    const toLine = Math.min(buffer.lineCount, buffer.lineAt(bufEnd) + 1 + FONT_LOCK_CONTEXT_LINES)
+    const spans = editor.fontLock(buffer, {
+      startLine: fromLine,
+      endLine: toLine,
+      start: buffer.lineStarts[fromLine] ?? 0,
+      end: toLine < buffer.lineCount ? buffer.lineStarts[toLine]! : buffer.text.length,
+    })
+    const lineSpans = pixel.displaySpans([...spans])
+      .filter(span => span.end > start && span.start < end)
+      .map(span => ({ ...span, start: Math.max(0, span.start - start), end: Math.min(lines[i]!.length, span.end - start) }))
+    const rows = pixelRowRanges(pixel.layout, lines[i]!, lineSpans, view.lineKinds?.[i])
+    const widths = chunkWidths(applyTheme(lines[i]!, lineSpans, pixel.layout.theme, { buffer }).chunks, pixel.layout)
+    g = { rows, xs: rowXOffsets(widths, rows) }
+    geometry.set(i, g)
+    return g
+  }
+
+  const dPoint = view.map(buffer.point)
+  let line = lineIndexOf(lineStarts, dPoint)
+  let g = geometryFor(line)
+  const offset = dPoint - lineStarts[line]!
+  // Point on a wrap boundary sits at the start of the continuation row.
+  let row = g.rows.findIndex(([start, end]) => offset >= start && offset < end)
+  if (row < 0) row = g.rows.length - 1
+  const pixelGoal = buffer.locals.get(PIXEL_GOAL) as { point: number; x: number } | undefined
+  const goalX = pixelGoal && pixelGoal.point === buffer.point ? pixelGoal.x : (g.xs[offset] ?? 0)
+
+  const step = delta > 0 ? 1 : -1
+  let moved = false
+  for (let remaining = Math.abs(delta); remaining > 0; remaining--) {
+    if (row + step >= 0 && row + step < g.rows.length) row += step
+    else if (line + step >= 0 && line + step < lines.length) {
+      line += step
+      g = geometryFor(line)
+      row = step > 0 ? 0 : g.rows.length - 1
+    } else break
+    moved = true
+  }
+  if (!moved) {
+    editor.message(step > 0 ? "End of buffer" : "Beginning of buffer")
+    return true
+  }
+
+  const [start, end] = g.rows[row]!
+  // The last glyph of a non-final row is the wrap break; Emacs never parks
+  // point after it, since that position belongs to the next row.
+  const last = row < g.rows.length - 1 ? Math.max(start, end - 1) : end
+  let target = start
+  for (let i = start; i <= last; i++) {
+    if ((g.xs[i] ?? 0) <= goalX + 0.5) target = i
+    else break
+  }
+  buffer.point = view.unmap(lineStarts[line]! + target)
+  buffer.locals.set(PIXEL_GOAL, { point: buffer.point, x: goalX })
+  return true
+}
+
+const FONT_LOCK_CONTEXT_LINES = 3
+
+/** Goal x of the last pixel visual move, valid while point stays where it left it. */
+const PIXEL_GOAL = "jemacs-pixel-goal-x"
+
+function lineIndexOf(lineStarts: readonly number[], offset: number): number {
+  let lo = 0
+  let hi = lineStarts.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (lineStarts[mid]! <= offset) lo = mid
+    else hi = mid - 1
+  }
+  return lo
 }
 
 function visibleLinesAtStart(
@@ -256,9 +392,10 @@ function maxStartLine(_bodyBudget: number, lineCount: number, _visualRows?: read
   return Math.max(0, lineCount - 1)
 }
 
-function displayView(buffer: BufferModel): { text: string; map: (n: number) => number; unmap: (n: number) => number } {
+function displayView(buffer: BufferModel): { text: string; map: (n: number) => number; unmap: (n: number) => number; lineKinds?: ReadonlyArray<string | undefined> } {
   const filter = displayFilterForBuffer(buffer)
   return {
+    lineKinds: filter?.lineKinds,
     text: filter?.text ?? buffer.text,
     map: filter?.map ?? ((n: number) => Math.max(0, Math.min(n, buffer.text.length))),
     unmap: filter?.unmap ?? ((n: number) => Math.max(0, Math.min(n, buffer.text.length))),

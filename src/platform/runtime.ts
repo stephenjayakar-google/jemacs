@@ -21,6 +21,10 @@ export function isSymbolicLink(st: StatLike): boolean {
   return (st.mode & S_IFLNK) === S_IFLNK
 }
 
+/** One entry of `readdirTypes`. `directory` is null when the type needs a `stat` (symlinks). */
+export type DirEntry = { name: string; directory: boolean | null }
+
+
 /** Returned by `watch`; call `close()` to stop receiving events. */
 export type WatchHandle = { close(): void }
 
@@ -45,6 +49,12 @@ export type PlatformRuntime = {
    *  through to nodeRuntime; callers already `.catch` the no-op throw. */
   unlink?(path: string): Promise<void>
   readdir(dir: string): Promise<string[]>
+  /** List `dir` and report the entry type in the same call. Optional: hosts
+   *  without it (RemoteRuntime today) fall back to `readdir` plus one `stat`
+   *  per entry. Worth implementing for a network mount, where the per-entry
+   *  `stat` costs one round trip each. `directory` is null for a symlink,
+   *  because the link's own type says nothing about its target. */
+  readdirTypes?(dir: string): Promise<DirEntry[]>
   /** Create a directory. Optional like `unlink` — RemoteRuntime ships these as
    *  link commands when it implements them; until then dired's mutating ops
    *  fall through to nodeRuntime (which throws in the browser stub, surfacing
@@ -75,8 +85,18 @@ export type PlatformRuntime = {
 
 let override: Partial<PlatformRuntime> | undefined
 
+const runtimeChangeListeners = new Set<() => void>()
+
+/** Run `listener` after every `setPlatformRuntime`. Callers that cache filesystem data use this
+ *  to drop the cache, because a new runtime shows a different filesystem. */
+export function onPlatformRuntimeChange(listener: () => void): () => void {
+  runtimeChangeListeners.add(listener)
+  return () => runtimeChangeListeners.delete(listener)
+}
+
 export function setPlatformRuntime(impl: Partial<PlatformRuntime> | undefined): void {
   override = impl
+  for (const listener of runtimeChangeListeners) listener()
 }
 
 /** Current override, for save/restore around a scoped install (attachShadow). */
@@ -291,6 +311,17 @@ export const nodeRuntime: PlatformRuntime = {
       return []
     }
   },
+  async readdirTypes(dir) {
+    try {
+      const entries = await nodeReaddir(dir, { withFileTypes: true })
+      return entries.map(entry => ({
+        name: entry.name,
+        directory: entry.isSymbolicLink() ? null : entry.isDirectory(),
+      }))
+    } catch {
+      return []
+    }
+  },
   spawnProcess: nodeSpawnProcess,
   connectTcp: nodeConnectTcp,
   findFreeTcpPort: nodeFindFreeTcpPort,
@@ -322,6 +353,20 @@ export const nodeRuntime: PlatformRuntime = {
 // and fall back to nodeRuntime. Prefer `editor.runtime.*` in new code; these
 // remain for call sites without an Editor in scope.
 
+const mutationListeners = new Set<(path: string) => void>()
+
+/** Run `listener` before every write that changes what a directory contains. Callers that cache
+ *  directory listings use this to drop the affected entry. */
+export function onPlatformRuntimeMutation(listener: (path: string) => void): () => void {
+  mutationListeners.add(listener)
+  return () => mutationListeners.delete(listener)
+}
+
+function notifyMutation(path: string): void {
+  for (const listener of mutationListeners) listener(path)
+}
+
+
 export function whichExecutable(name: string): string | null {
   return (override?.whichExecutable ?? nodeRuntime.whichExecutable)(name)
 }
@@ -335,6 +380,7 @@ export async function readFileText(path: string): Promise<string> {
 }
 
 export async function writeFileText(path: string, text: string): Promise<void> {
+  notifyMutation(path)
   return (override?.writeFileText ?? nodeRuntime.writeFileText)(path, text)
 }
 
@@ -351,6 +397,7 @@ export async function readlink(path: string): Promise<string> {
 }
 
 export async function unlink(path: string): Promise<void> {
+  notifyMutation(path)
   return (override?.unlink ?? nodeRuntime.unlink!)(path)
 }
 
@@ -358,19 +405,31 @@ export async function readdir(dir: string): Promise<string[]> {
   return (override?.readdir ?? nodeRuntime.readdir)(dir)
 }
 
+/** List `dir` with entry types, or null when the runtime cannot do it in one call. */
+export async function readdirTypes(dir: string): Promise<DirEntry[] | null> {
+  const impl = override ? override.readdirTypes : nodeRuntime.readdirTypes
+  if (!impl) return null
+  return impl(dir)
+}
+
 export async function mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> {
+  notifyMutation(path)
   return (override?.mkdir ?? nodeRuntime.mkdir!)(path, opts)
 }
 
 export async function cp(src: string, dest: string, opts?: { recursive?: boolean; force?: boolean }): Promise<void> {
+  notifyMutation(dest)
   return (override?.cp ?? nodeRuntime.cp!)(src, dest, opts)
 }
 
 export async function rename(src: string, dest: string): Promise<void> {
+  notifyMutation(src)
+  notifyMutation(dest)
   return (override?.rename ?? nodeRuntime.rename!)(src, dest)
 }
 
 export async function rm(path: string, opts?: { recursive?: boolean; force?: boolean }): Promise<void> {
+  notifyMutation(path)
   return (override?.rm ?? nodeRuntime.rm!)(path, opts)
 }
 
@@ -383,10 +442,12 @@ export async function utimes(path: string, atime: Date, mtime: Date): Promise<vo
 }
 
 export async function symlink(target: string, path: string): Promise<void> {
+  notifyMutation(path)
   return (override?.symlink ?? nodeRuntime.symlink!)(target, path)
 }
 
 export async function link(existingPath: string, newPath: string): Promise<void> {
+  notifyMutation(newPath)
   return (override?.link ?? nodeRuntime.link!)(existingPath, newPath)
 }
 

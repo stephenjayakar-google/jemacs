@@ -82,10 +82,26 @@ test("inferMode routes xml family files", () => {
 
 test("inferMode routes rst, tex, and bibtex files", () => {
   expect(inferMode("docs/index.rst")).toBe("rst-mode")
-  expect(inferMode("paper.tex")).toBe("latex-mode")
-  expect(inferMode("macros.sty")).toBe("tex-mode")
-  expect(inferMode("article.cls")).toBe("tex-mode")
+  // `auto-mode-alist` sends these straight to latex-mode, with no content check.
+  expect(inferMode("paper.ltx")).toBe("latex-mode")
+  expect(inferMode("macros.sty")).toBe("latex-mode")
+  expect(inferMode("article.cls")).toBe("latex-mode")
+  expect(inferMode("refs.bbl")).toBe("latex-mode")
   expect(inferMode("refs.bib")).toBe("bibtex-mode")
+  // GNU has no `.latex` rule, so it falls through like any unknown suffix.
+  expect(inferMode("paper.latex")).toBe("fundamental-mode")
+})
+
+// `.tex` goes to `tex-mode`, which is a dispatcher: `tex--guess-mode` reads the
+// first non-commented backslash and redirects. Each case below is the literal
+// `major-mode` reported by `emacs -Q --batch` after visiting the same content.
+test("inferMode dispatches .tex on content, like tex--guess-mode", () => {
+  expect(inferMode("a.tex", "\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n")).toBe("latex-mode")
+  expect(inferMode("a.tex", "\\magnification=1200\n\\hsize=6in\nHello $x$.\n\\bye\n")).toBe("plain-tex-mode")
+  // No backslash at all falls back to `tex-default-mode`, which is latex-mode.
+  expect(inferMode("a.tex", "no commands here at all\n")).toBe("latex-mode")
+  // A `\documentclass` behind a `%` does not count; the first real command wins.
+  expect(inferMode("a.tex", "% \\documentclass{article}\n\\def\\x{1}\n\\bye\n")).toBe("plain-tex-mode")
 })
 
 test("inferMode routes cmake and go module files", () => {

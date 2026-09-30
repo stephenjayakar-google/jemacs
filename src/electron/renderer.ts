@@ -2,6 +2,7 @@ import type { SerializedDisplayModel } from "../display/serialize"
 import { DOM_FRAME_ROW_PX, presentDomFrame } from "../display/dom-frame"
 import { domKeyFromKeyboardEvent, domKeyPlatform, isDomHideShortcut, isDomModifierOnlyKey, isDomPasteShortcut } from "./dom-key"
 import { XtermPaneRegistry } from "./xterm-panes"
+import { FontMeasurer } from "../display/font-measure"
 
 const titleEl = document.getElementById("jemacs-title")!
 const tabBarEl = document.getElementById("jemacs-tab-bar")!
@@ -18,12 +19,15 @@ declare global {
       onDisplay(handler: (model: SerializedDisplayModel) => void): () => void
       onTerminalData(handler: (payload: unknown) => void): () => void
       sendInput(payload: unknown): void
+      sendFontMetrics?(batch: unknown, reset: boolean): void
       readClipboardText(): string | Promise<string>
       hideApplication?(): void
       ready(): void
     }
   }
 }
+
+const fontMeasurer = new FontMeasurer((batch, reset) => window.jemacs.sendFontMetrics?.(batch, reset))
 
 function present(model: SerializedDisplayModel): void {
   presentDomFrame(
@@ -40,6 +44,9 @@ function present(model: SerializedDisplayModel): void {
       window.jemacs.sendInput({ type: "tab-bar", col })
     },
   )
+  // After painting: a font first drawn in this frame is measured now, and the
+  // kernel re-wraps with exact widths on the next redisplay.
+  fontMeasurer.observe(model)
 }
 document.addEventListener("keydown", async event => {
   if (event.defaultPrevented) return

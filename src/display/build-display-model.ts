@@ -8,6 +8,7 @@ import { paneWrapLayoutFor } from "./display-wrap"
 import { computeLineVisualRows, computeWrappedLineRows, hasNonUnitVisualRows, visualRowLineRange } from "./visual-line-height"
 import { buildLogicalModel, pointLineCol, type LogicalPane, type LogicalWindowNode } from "./logical"
 import { layoutCharGrid, splitColBudget, splitLineBudget } from "./char-grid-layout"
+import { PIXEL_DISPLAY_LOCAL, pixelRowCounts, pixelWrapFor } from "./pixel-wrap"
 
 export type BuildDisplayOptions = {
   lastMessage?: string
@@ -23,6 +24,7 @@ export type BuildDisplayOptions = {
 export function buildDisplayModel(editor: Editor, options: BuildDisplayOptions): DisplayModel {
   const { viewport, lastMessage, hostLabel, hostCapabilities, frameId } = options
   setEditorDisplayContext(editor, viewport, hostCapabilities)
+  markPixelDisplayBuffers(editor, hostCapabilities)
   const logical = buildLogicalModel(editor, { lastMessage, hostLabel, frameId })
   const selected = syncEditorWindowGeometry(editor, logical, viewport)
   const model = layoutCharGrid(logical, viewport, hostCapabilities)
@@ -37,11 +39,25 @@ export function buildDisplayModel(editor: Editor, options: BuildDisplayOptions):
       selected.pane,
       selected.maxLines,
       selected.cols,
-      hostCapabilities?.perFaceFonts === true,
+      hostCapabilities,
     )
     editor.syncSelectedWindowViewport(selected.maxLines, visualRows)
   }
   return model
+}
+
+/**
+ * Tell each visible buffer whether it is drawn by a host that measures fonts
+ * (`PIXEL_DISPLAY_LOCAL`). Set before the logical build, because the markdown
+ * display filter reads it: CSS draws a GUI rule and quote bar, so the filter
+ * must not emit glyphs for them there. The TUI keeps the glyphs.
+ */
+function markPixelDisplayBuffers(editor: Editor, hostCapabilities: HostCapabilities | undefined): void {
+  const pixel = hostCapabilities?.perFaceFonts === true && hostCapabilities.fontMetrics != null
+  for (const buffer of editor.buffers.values()) {
+    if (pixel) buffer.locals.set(PIXEL_DISPLAY_LOCAL, true)
+    else if (buffer.locals.has(PIXEL_DISPLAY_LOCAL)) buffer.locals.delete(PIXEL_DISPLAY_LOCAL)
+  }
 }
 
 type SelectedLeaf = { pane: LogicalPane; maxLines: number; cols?: number }
@@ -105,7 +121,8 @@ function stampPaneGeometry(pane: LogicalPane, rows: number, cols: number | undef
   locals.set("window-body-cols", Math.max(1, cols ?? fallbackCols ?? 80))
 }
 
-function selectedVisualRows(editor: Editor, pane: LogicalPane, maxLines: number, cols: number | undefined, useFontMetrics: boolean): number[] | undefined {
+function selectedVisualRows(editor: Editor, pane: LogicalPane, maxLines: number, cols: number | undefined, hostCapabilities: HostCapabilities | undefined): number[] | undefined {
+  const useFontMetrics = hostCapabilities?.perFaceFonts === true
   const dText = pane.displayText
   const map = pane.displayMap
   const dPoint = map ? map(pane.point) : pane.point
@@ -136,6 +153,19 @@ function selectedVisualRows(editor: Editor, pane: LogicalPane, maxLines: number,
   const dFontLockSpans = map
     ? pane.fontLockSpans.map(s => ({ ...s, start: map(s.start), end: map(s.end) }))
     : pane.fontLockSpans
+  // The same pixel wrap `layoutLeafPane` uses, so the persisted `startLine`
+  // and the rendered one agree (see `JemacsHostBinding.modelFor`).
+  const showGutter = pane.showLineNumbers || Boolean(pane.gutterDecorations?.length)
+  const pixel = pixelWrapFor({
+    locals: pane.locals,
+    cols,
+    showGutter,
+    perFaceFonts: true,
+    metrics: hostCapabilities?.fontMetrics,
+    theme: editor.theme,
+    buffer: pane.buffer,
+    textScale: pane.textScale,
+  })
   return computeLineVisualRows(dText, dFontLockSpans, editor.theme, pane.buffer, pane.textScale, {
     wrapCols: wrapLayout.wrapCols,
     gutterPrefixLen: wrapLayout.gutterPrefixLen,
@@ -144,6 +174,7 @@ function selectedVisualRows(editor: Editor, pane: LogicalPane, maxLines: number,
     displayLines,
     fromLine: lineRange.fromLine,
     toLine: lineRange.toLine,
+    ...(pixel ? { ...pixelRowCounts(pixel, displayLines, dFontLockSpans, lineRange.fromLine, lineRange.toLine, pane.displayLineKinds, pane.displayLineImages), lineHeight: pixel.lineHeight } : {}),
   })
 }
 

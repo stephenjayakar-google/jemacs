@@ -32,10 +32,8 @@ export const FACE_REMAP_KEY = "jemacs-face-remap"
 /** Font stacks for the Emacs `variable-pitch` / `fixed-pitch` base faces.
  *  Prose modes remap `default` → variable-pitch and keep code spans on
  *  fixed-pitch so monospace alignment survives a proportional body. */
-// Bundled webfont first (served by WebHost at /fonts/), then system stacks,
-// then generic — so a missing font file degrades to "different mono", not serif.
-export const VARIABLE_PITCH_FAMILY = '"JemacsSans", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif'
-export const FIXED_PITCH_FAMILY = '"JemacsMono", ui-monospace, "Fira Code", "Cascadia Code", Menlo, Consolas, monospace'
+export { FIXED_PITCH_FAMILY, VARIABLE_PITCH_FAMILY } from "../display/font-metrics"
+import { FIXED_PITCH_FAMILY, VARIABLE_PITCH_FAMILY } from "../display/font-metrics"
 
 export function mergeFaceStyles(base: FaceStyle | undefined, overlay: FaceStyle | undefined): FaceStyle | undefined {
   if (!overlay) return base
@@ -375,7 +373,10 @@ function applyFaceRemap(base: FaceStyle | undefined, remap: FaceStyle): FaceStyl
   if (height != null) result = { ...result, height }
   if (heightScale != null) {
     const currentHeight = result?.height ?? base?.height
-    if (currentHeight != null) result = { ...result, height: currentHeight * heightScale, heightScale: undefined }
+    // Emacs keeps `:height` an integer in tenths of a point, so round here too.
+    // `200 * 1.1` is 220.00000000000003 in binary floating point, which leaked
+    // into the DOM as a `font-size` with 14 decimal places.
+    if (currentHeight != null) result = { ...result, height: Math.round(currentHeight * heightScale), heightScale: undefined }
     else result = { ...result, heightScale }
   }
   return result

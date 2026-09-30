@@ -3,6 +3,8 @@ import type { SerializedChildFrame, SerializedDisplayModel, SerializedPane, Seri
 import type { TerminalCell, TerminalSurfaceModel } from "./terminal-surface"
 import type { CanvasSurfaceModel, WebNodeModel } from "../kernel/extension-points"
 
+import { cssFontWeight } from "./font-metrics"
+import type { RowDecorationModel } from "./protocol"
 export type SerializedChunk = SerializedThemedText["chunks"][number]
 
 export const DOM_FRAME_ROW_PX = 18
@@ -26,15 +28,18 @@ export function effectiveFontSizePx(
 export function renderChunk(
   parent: HTMLElement,
   chunk: SerializedChunk,
-  options: { textScale?: number; defaultFontPx?: number; defaultFamily?: string } = {},
+  options: { textScale?: number; defaultFontPx?: number; defaultFamily?: string; defaultBg?: string } = {},
 ): void {
   const span = document.createElement("span")
   span.textContent = chunk.text
   if (chunk.fg) span.style.color = chunk.fg
-  if (chunk.bg) span.style.backgroundColor = chunk.bg
-  if (chunk.bold) span.style.fontWeight = "bold"
+  // The pane already paints the default background. Painting it again per
+  // span covered row decorations (the code panel) with default-coloured boxes.
+  if (chunk.bg && chunk.bg !== options.defaultBg) span.style.backgroundColor = chunk.bg
+  if (chunk.weight) span.style.fontWeight = String(cssFontWeight(chunk))
+  else if (chunk.bold) span.style.fontWeight = "bold"
   if (chunk.italic) span.style.fontStyle = "italic"
-  if (chunk.underline) span.style.textDecoration = "underline"
+  applyDecorations(span, chunk)
   // Only override when this chunk's family is an actual remap; otherwise let
   // the body{} font-family cascade.
   if (chunk.family && chunk.family !== options.defaultFamily) span.style.fontFamily = chunk.family
@@ -45,6 +50,28 @@ export function renderChunk(
     span.style.fontSize = `${fontPx}px`
   }
   parent.appendChild(span)
+}
+
+/** Emacs underline, overline and strike-through, each with an optional colour. */
+function applyDecorations(span: HTMLElement, chunk: SerializedChunk): void {
+  const lines: string[] = []
+  if (chunk.underline) lines.push("underline")
+  if (chunk.overline) lines.push("overline")
+  if (chunk.strikeThrough) lines.push("line-through")
+  if (lines.length) {
+    span.style.textDecorationLine = lines.join(" ")
+    const color = chunk.underlineColor
+      ?? (typeof chunk.strikeThrough === "string" ? chunk.strikeThrough : undefined)
+      ?? (typeof chunk.overline === "string" ? chunk.overline : undefined)
+    if (color) span.style.textDecorationColor = color
+    if (chunk.underlineStyle === "wave") span.style.textDecorationStyle = "wavy"
+  }
+  // An inset shadow, not a border: a border would widen the glyphs, and the
+  // kernel wrapped this row against their unboxed width.
+  if (chunk.box) {
+    span.style.boxShadow = `inset 0 0 0 ${chunk.box.width}px ${chunk.box.color ?? "currentColor"}`
+    span.style.borderRadius = "3px"
+  }
 }
 
 export function renderThemedText(
@@ -64,16 +91,18 @@ export function renderThemedText(
  */
 function rowSignature(
   parts: Array<{ chunk: SerializedChunk; text: string }>,
-  options: { textScale?: number; defaultFontPx?: number; defaultFamily?: string },
+  options: { textScale?: number; defaultFontPx?: number; defaultFamily?: string; defaultBg?: string },
 ): string {
   const scale = options.textScale ?? 1
   const defaultPx = options.defaultFontPx ?? DOM_FRAME_BODY_FONT_PX
   const family = options.defaultFamily ?? ""
-  let out = `${scale}|${defaultPx}|${family}`
+  let out = `${scale}|${defaultPx}|${family}|${options.defaultBg ?? ""}`
   for (const { chunk, text } of parts) {
     out += `\u0000${text}\u0001${chunk.fg ?? ""}\u0001${chunk.bg ?? ""}`
       + `\u0001${chunk.bold ? 1 : 0}${chunk.italic ? 1 : 0}${chunk.underline ? 1 : 0}`
       + `\u0001${chunk.family ?? ""}\u0001${chunk.height ?? ""}\u0001${chunk.heightScale ?? ""}`
+      + `\u0001${chunk.weight ?? ""}\u0001${chunk.strikeThrough ?? ""}\u0001${chunk.overline ?? ""}`
+      + `\u0001${chunk.underlineStyle ?? ""}\u0001${chunk.underlineColor ?? ""}\u0001${chunk.box ? `${chunk.box.width}${chunk.box.color ?? ""}` : ""}`
   }
   return out
 }
@@ -97,7 +126,7 @@ const rowSignatures = new WeakMap<object, string>()
 export function renderBodyRows(
   el: HTMLElement,
   model: SerializedThemedText,
-  options: { textScale?: number; defaultFontPx?: number; defaultFamily?: string } = {},
+  options: { textScale?: number; defaultFontPx?: number; defaultFamily?: string; defaultBg?: string; decorations?: SerializedPane["rowDecorations"] } = {},
 ): HTMLElement[] {
   el.classList.add("web-body")
 
@@ -127,18 +156,21 @@ export function renderBodyRows(
   const rows: HTMLElement[] = []
   for (let i = 0; i < lines.length; i++) {
     const parts = lines[i]!
-    const signature = rowSignature(parts, options)
+    const decoration = options.decorations?.[i] ?? null
+    const signature = rowSignature(parts, options) + decorationSignature(decoration)
     const reusable = existing[i]
     if (reusable && rowSignatures.get(reusable) === signature) {
       rows.push(reusable)
       continue
     }
     const row = reusable ?? document.createElement("div")
-    if (!reusable) row.className = "body-row"
+    if (!reusable || decoration || row.className !== "body-row") row.className = "body-row"
+    applyRowDecoration(row, decoration)
     // Same element, new content: swap the spans rather than the row itself, so the
     // browser repaints one line instead of the whole body.
     row.replaceChildren()
     for (const { chunk, text } of parts) renderChunk(row, { ...chunk, text }, options)
+    if (decoration?.image) appendInlineImage(row, decoration.image)
     rowSignatures.set(row, signature)
     rows.push(row)
   }
@@ -159,6 +191,48 @@ export function renderBodyRows(
     if (row.parentNode !== el) el.appendChild(row)
   }
   return rows
+}
+
+function decorationSignature(d: RowDecorationModel | null): string {
+  return d ? `\u0002${d.kind}${d.first ? "f" : ""}${d.last ? "l" : ""}|${d.insetPx ?? ""}|${d.insetRightPx ?? ""}|${d.padTopPx ?? ""}|${d.image ? `${d.image.src}@${d.image.widthPx}x${d.image.heightPx}` : ""}` : ""
+}
+
+/**
+ * Row decoration as classes plus inline px. The kernel computed the px (and
+ * wrapped and costed the row with them), so CSS must not add its own
+ * horizontal padding or vertical space: only colours, borders and radii.
+ */
+function applyRowDecoration(row: HTMLElement, d: RowDecorationModel | null): void {
+  const style = row.style
+  if (!d) {
+    if (style.getPropertyValue?.("--jemacs-row-inset")) style.removeProperty("--jemacs-row-inset")
+    if (style.getPropertyValue?.("--jemacs-row-inset-right")) style.removeProperty("--jemacs-row-inset-right")
+    if (style.paddingTop) style.paddingTop = ""
+    return
+  }
+  const classes = row.classList as DOMTokenList
+  classes.add(`row-${d.kind}`)
+  if (d.first) classes.add("row-first")
+  if (d.last) classes.add("row-last")
+  style.setProperty?.("--jemacs-row-inset", `${d.insetPx ?? 0}px`)
+  style.setProperty?.("--jemacs-row-inset-right", `${d.insetRightPx ?? 0}px`)
+  style.paddingTop = d.padTopPx ? `${d.padTopPx}px` : ""
+}
+
+/**
+ * An inline image as a block under the row's text. It carries no text, so
+ * caret and click offsets (which walk text nodes) ignore it; its box is the
+ * size the kernel costed the row with.
+ */
+function appendInlineImage(row: HTMLElement, image: NonNullable<RowDecorationModel["image"]>): void {
+  const img = document.createElement("img") as HTMLImageElement
+  img.className = "inline-image"
+  img.src = image.src
+  img.alt = ""
+  img.draggable = false
+  img.style.width = `${image.widthPx}px`
+  img.style.height = `${image.heightPx}px`
+  row.appendChild(img)
 }
 
 /** rAF handles scheduled by `renderCaret`, cancelled on the next
@@ -216,9 +290,27 @@ function charRectAtOffset(row: HTMLElement, colOffset: number): DOMRect | null {
  *  visibly change height from line to line and tower over inline code. */
 function fontPxAtCaret(rowEl: HTMLElement, colOffset: number, fallbackPx: number): number {
   const host = elementAtCharOffset(rowEl, colOffset) ?? rowEl
-  if (typeof getComputedStyle !== "function") return fallbackPx
-  const px = Number.parseFloat(getComputedStyle(host).fontSize)
-  return Number.isFinite(px) && px > 0 ? px : fallbackPx
+  if (typeof getComputedStyle === "function") {
+    const px = Number.parseFloat(getComputedStyle(host).fontSize)
+    if (Number.isFinite(px) && px > 0) return px
+  }
+  // `getComputedStyle` does not resolve inline styles in every DOM
+  // implementation we render under (happy-dom returns nothing usable), and the
+  // caret then silently sized itself off `fallbackPx` -- a 40px heading got an
+  // 18px cursor. The font size we care about is the one `renderBodyRows` wrote
+  // onto the span, so read that directly before giving up.
+  return inlineFontPx(host) ?? fallbackPx
+}
+
+/** Inline `font-size` on `el` or the nearest ancestor that sets one, in px. */
+function inlineFontPx(el: HTMLElement | null): number | null {
+  for (let node: HTMLElement | null = el; node; node = node.parentElement) {
+    const raw = node.style?.fontSize
+    if (!raw) continue
+    const px = Number.parseFloat(raw)
+    if (Number.isFinite(px) && px > 0) return px
+  }
+  return null
 }
 
 /** The element whose font applies at `colOffset` (the span containing that
@@ -269,6 +361,11 @@ export function renderCaret(
     // own line box, not on the row.
     let lineTop = rowRect.top
     let lineHeight = rowRect.height || DOM_FRAME_ROW_PX
+    // The row's own top, kept separate: `lineTop` is overwritten with the glyph
+    // rect below, and a box cursor is anchored to the line, not to the glyph.
+    // Skip decoration padding (space above a heading): the line box starts
+    // below it, and a box cursor anchors to the line box.
+    const rowTop = rowRect.top + (Number.parseFloat(rowEl.style?.paddingTop ?? "") || 0)
     const range = rangeAtCharOffset(rowEl, cursor.colOffset)
     if (range) {
       const r = range.getBoundingClientRect()
@@ -286,14 +383,39 @@ export function renderCaret(
     // leading (and a row's leading is set by its tallest face), so measuring
     // them made the caret a different height on nearly every markdown line.
     const fontPx = fontPxAtCaret(rowEl, cursor.colOffset, lineHeight / DOM_FRAME_LINE_HEIGHT_RATIO)
-    const height = Math.round(fontPx * CARET_HEIGHT_RATIO)
+    // A bar sits just outside the em box so it clears the glyph. A box instead
+    // covers the character cell, exactly as Emacs does: measured in the running
+    // Emacs, the box on a 40px heading is the glyph's own 30px wide and one line
+    // cell tall. Applying the bar's 1.2 ratio to a box made it 48px there --
+    // taller than the text, so it hung below the baseline.
+    //
+    // The cell comes from the font, never from `lineHeight`: that variable is
+    // the *glyph* rect once a range measures (19px for a 40px `H`, since a
+    // range reports the inked box, not the line box), and it is the 18px row
+    // default before layout runs. Both make the box far too short.
+    const height = block
+      ? Math.round(fontPx * DOM_FRAME_LINE_HEIGHT_RATIO)
+      : Math.round(fontPx * CARET_HEIGHT_RATIO)
     // A box cursor is as wide as the glyph it sits on; a bar is a fixed sliver.
     const width = block
       ? Math.max(CARET_MIN_WIDTH_PX, Math.round(
         charRectAtOffset(rowEl, cursor.colOffset)?.width ?? fontPx * BLOCK_FALLBACK_WIDTH_RATIO))
       : Math.max(CARET_MIN_WIDTH_PX, Math.round(fontPx * CARET_WIDTH_RATIO))
-    const caretTop = lineTop - bodyRect.top + body.scrollTop
-      + Math.max(0, (lineHeight - height) / 2)
+    // Where the cell sits vertically.
+    //
+    // Emacs anchors a box cursor to the top of the line it is on:
+    // `pos-visible-in-window-p` with a 40px heading reports y=0 in a 49px line.
+    // A bar is instead centred on the glyph it marks.
+    //
+    // `lineTop`/`lineHeight` hold the *glyph* rect once a range measures one,
+    // not the line box, so the old `(lineHeight - height) / 2` term centred a
+    // 54px cell inside a 19px glyph: it clamped to 0, pinning the caret's top
+    // to the glyph's top and leaving it hanging half a cell below the text,
+    // over the following line. Measured in Chromium, the caret ran 28..82px
+    // inside a row only 54px tall.
+    const caretTop = block
+      ? rowTop - bodyRect.top + body.scrollTop
+      : lineTop - bodyRect.top + body.scrollTop + Math.max(0, (lineHeight - height) / 2)
     caret.style.left = `${left - bodyRect.left + body.scrollLeft}px`
     caret.style.top = `${caretTop}px`
     caret.style.height = `${height}px`
@@ -528,7 +650,7 @@ function fillPane(
   const bodyDefaultPx = defaultFace?.height != null ? defaultFace.height / 10 : DOM_FRAME_BODY_FONT_PX
   bodyEl.style.fontSize = `${bodyDefaultPx * textScale}px`
   bodyEl.style.lineHeight = String(DOM_FRAME_LINE_HEIGHT_RATIO)
-  removeClasses(bodyEl, "terminal-surface", "xterm-surface", "rich-table-surface", "web-surface", "web-body")
+  removeClasses(bodyEl, "terminal-surface", "xterm-surface", "rich-table-surface", "web-surface", "web-body", "text-column")
   if (model.terminalSurface) {
     bodyEl.style.setProperty("--jemacs-terminal-row-px", `${rowPx}px`)
     bodyEl.style.setProperty("--jemacs-terminal-col-px", `${colPx}px`)
@@ -540,21 +662,45 @@ function fillPane(
   else if (model.webSurface) {
     renderWebSurface(bodyEl, model, theme, onPaneAction)
   }
-  else if (model.cursor) {
-    const rows = renderBodyRows(bodyEl, model.body, { textScale, defaultFontPx: bodyDefaultPx, defaultFamily })
-    renderCaret(bodyEl, rows, model.cursor, defaultFace?.fg)
+  else {
+    applyTextColumn(bodyEl, model.textColumn)
+    const rows = renderBodyRows(bodyEl, model.body, { textScale, defaultFontPx: bodyDefaultPx, defaultFamily, decorations: model.rowDecorations, defaultBg: defaultFace?.bg })
+    if (model.cursor) renderCaret(bodyEl, rows, model.cursor, defaultFace?.fg)
   }
-  else renderBodyRows(bodyEl, model.body, { textScale, defaultFontPx: bodyDefaultPx, defaultFamily })
   if (modelineFace?.bg) modelineEl.style.backgroundColor = modelineFace.bg
   if (modelineFace?.fg) modelineEl.style.color = modelineFace.fg
   const modelineDefaultPx = modelineFace?.height != null ? modelineFace.height / 10 : DOM_FRAME_MODELINE_FONT_PX
   footerEl.style.display = model.footer ? "" : "none"
-  footerEl.style.fontSize = `${modelineDefaultPx * textScale}px`
+  // `text-scale-mode` scales the buffer's text, not the mode line: Emacs remaps
+  // only `default`. Scaling it here made a zoomed mode line wrap onto a second row.
+  footerEl.style.fontSize = `${modelineDefaultPx}px`
   if (modelineFace?.family && modelineFace.family !== defaultFamily) footerEl.style.fontFamily = modelineFace.family
-  renderThemedText(footerEl, model.footer ?? { chunks: [] }, { textScale, defaultFontPx: modelineDefaultPx, defaultFamily })
-  modelineEl.style.fontSize = `${modelineDefaultPx * textScale}px`
+  renderThemedText(footerEl, model.footer ?? { chunks: [] }, { defaultFontPx: modelineDefaultPx, defaultFamily })
+  modelineEl.style.fontSize = `${modelineDefaultPx}px`
   if (modelineFace?.family && modelineFace.family !== defaultFamily) modelineEl.style.fontFamily = modelineFace.family
-  renderThemedText(modelineEl, model.modeline, { textScale, defaultFontPx: modelineDefaultPx, defaultFamily })
+  renderThemedText(modelineEl, model.modeline, { defaultFontPx: modelineDefaultPx, defaultFamily })
+}
+
+/**
+ * A pixel-wrapped pane (`textColumn`): the kernel already broke every row at
+ * the column width, so rows must not wrap again (`text-column` sets
+ * `white-space: pre`), and the column is centred with a px margin instead of
+ * leading spaces. Rows carry the margin as padding so a click in it still
+ * lands on its row, and so the caret's measured x includes it.
+ */
+function applyTextColumn(bodyEl: HTMLElement, column: SerializedPane["textColumn"]): void {
+  if (!column) {
+    removeClasses(bodyEl, "text-column")
+    bodyEl.style.removeProperty?.("--jemacs-column-left")
+    bodyEl.style.removeProperty?.("--jemacs-column-width")
+    if (bodyEl.style.lineHeight) bodyEl.style.lineHeight = ""
+    return
+  }
+  bodyEl.classList.add("text-column")
+  bodyEl.style.setProperty("--jemacs-column-left", `${column.leftPx}px`)
+  bodyEl.style.setProperty("--jemacs-column-width", `${column.widthPx}px`)
+  // The kernel costed rows at this line height; keep the two in step.
+  bodyEl.style.lineHeight = String(column.lineHeight)
 }
 
 function removeClasses(el: HTMLElement, ...classes: string[]): void {
@@ -577,6 +723,8 @@ function patchPane(
   const chromeChanged = prev.selected !== next.selected || prev.textScale !== next.textScale
   const bodyChanged = !sameJson(prev.body, next.body)
     || !sameJson(prev.cursor, next.cursor)
+    || !sameJson(prev.textColumn, next.textColumn)
+    || !sameJson(prev.rowDecorations, next.rowDecorations)
     || !sameJson(prev.terminalSurface, next.terminalSurface)
     || !sameJson(prev.tableSurface, next.tableSurface)
     || !sameJson(prev.webSurface, next.webSurface)
@@ -614,22 +762,22 @@ function patchPane(
     }
     else if (next.tableSurface) renderTableSurface(dom.bodyEl, next, theme, onPaneAction)
     else if (next.webSurface) renderWebSurface(dom.bodyEl, next, theme, onPaneAction)
-    else if (next.cursor) {
-      const rows = renderBodyRows(dom.bodyEl, next.body, { textScale, defaultFontPx: bodyDefaultPx, defaultFamily })
-      renderCaret(dom.bodyEl, rows, next.cursor, defaultFace?.fg)
+    else {
+      applyTextColumn(dom.bodyEl, next.textColumn)
+      const rows = renderBodyRows(dom.bodyEl, next.body, { textScale, defaultFontPx: bodyDefaultPx, defaultFamily, decorations: next.rowDecorations, defaultBg: defaultFace?.bg })
+      if (next.cursor) renderCaret(dom.bodyEl, rows, next.cursor, defaultFace?.fg)
     }
-    else renderBodyRows(dom.bodyEl, next.body, { textScale, defaultFontPx: bodyDefaultPx, defaultFamily })
   }
   if (modelineChanged) {
     const modelineFace = themeFace(theme, next.selected ? "modeLine" : "modeLineInactive")
     const modelineDefaultPx = modelineFace?.height != null ? modelineFace.height / 10 : DOM_FRAME_MODELINE_FONT_PX
-    renderThemedText(dom.modelineEl, next.modeline, { textScale, defaultFontPx: modelineDefaultPx, defaultFamily })
+    renderThemedText(dom.modelineEl, next.modeline, { defaultFontPx: modelineDefaultPx, defaultFamily })
   }
   if (footerChanged) {
     const modelineFace = themeFace(theme, next.selected ? "modeLine" : "modeLineInactive")
     const modelineDefaultPx = modelineFace?.height != null ? modelineFace.height / 10 : DOM_FRAME_MODELINE_FONT_PX
     dom.footerEl.style.display = next.footer ? "" : "none"
-    renderThemedText(dom.footerEl, next.footer ?? { chunks: [] }, { textScale, defaultFontPx: modelineDefaultPx, defaultFamily })
+    renderThemedText(dom.footerEl, next.footer ?? { chunks: [] }, { defaultFontPx: modelineDefaultPx, defaultFamily })
   }
 }
 

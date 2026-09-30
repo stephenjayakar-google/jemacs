@@ -69,6 +69,7 @@ export function faceStyleHasVisual(style?: FaceStyle): boolean {
   if (!style) return false
   return Boolean(
     style.fg || style.bg || style.bold || style.italic || style.underline
-      || style.family || style.height != null || style.heightScale != null,
+      || style.family || style.height != null || style.heightScale != null
+      || style.weight || style.strikeThrough || style.overline || style.box,
   )
 }

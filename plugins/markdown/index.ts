@@ -13,6 +13,8 @@ import { defineMode, enterMode, getMode, modeFeature, type FaceName, type FontLo
 import { registeredTreeSitterLanguages, treeSitterFontLock } from "../../src/modes/tree-sitter"
 import { spawnProcess, writeFileText, type SpawnHandle, type SpawnOptions } from "../../src/platform/runtime"
 import { registerTreeSitterGrammars } from "../tree-sitter-grammars"
+import { PIXEL_DISPLAY_LOCAL } from "../../src/display/pixel-wrap"
+import { findInlineImage, type InlineImage } from "./inline-images"
 
 const TAB_WIDTH = 4
 const LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+/
@@ -47,8 +49,20 @@ const MARKDOWN_CYCLE_REPEAT = "markdown-cycle-repeat"
 const MARKDOWN_FILL_COLUMN = "markdown-fill-column"
 const MARKDOWN_VISUAL_FILL = "markdown-visual-fill-column-mode"
 const MARKDOWN_FOOTNOTE_RETURN_POINT = "markdown-footnote-return-point"
+/** Fallback rule width when the window geometry is not known yet (80 - 1). */
+const MARKDOWN_DEFAULT_RULE_WIDTH = 79
 
 defcustom("markdown-fill-column", "integer", 100, "Soft-wrap width for markdown buffers (Stephen's Notion-style layout).", "text")
+// `(face-remap-add-relative 'default :family "Helvetica Neue" :height 200)` in
+// my-markdown-mode-hook. Emacs `:height` is tenths of a point, so 200 is 20pt:
+// `font-at` on body prose reports `Helvetica Neue` at size 20, and the H1 at
+// 2.0x reports 40. Customizable so a machine without Helvetica Neue can pick a
+// different prose font without editing the plugin.
+defcustom("markdown-body-font-family", "string",
+  "\"Helvetica Neue\", system-ui, -apple-system, \"Segoe UI\", Arial, sans-serif",
+  "Font family for the markdown body, remapped onto `default`.", "text")
+defcustom("markdown-body-font-height", "integer", 200,
+  "Markdown body font height, in tenths of a point (Emacs `:height`).", "text")
 defcustom("markdown-visual-fill-column-center-text", "boolean", true, "Center body text within the fill column.", "text")
 defcustom("markdown-fontify-code-blocks-natively", "boolean", false, "Fontify fenced code blocks using the language major mode.", "text")
 defcustom("markdown-indent-on-enter", "string", "indent-and-new-item", "Behavior of RET in markdown mode.", "text")
@@ -91,15 +105,22 @@ function fencedCodeBlocksFor(buffer: BufferModel): FencedCodeBlock[] {
   fencedBlockCache.set(buffer, { text: buffer.text, blocks })
   return blocks
 }
-const LIST_BULLET = "•"
+/** `markdown-list-item-bullets`: one glyph per nesting depth, cycled. */
+const LIST_ITEM_BULLETS = ["\u25cf", "\u25ce", "\u25cb", "\u25c6", "\u25c7", "\u25ba", "\u2022"] as const
+/** Lighter bullets for a GUI text column, where the markers are drawn faint. */
+const GUI_LIST_ITEM_BULLETS = ["\u2022", "\u25e6", "\u25aa", "\u2022", "\u25e6", "\u25aa"] as const
+/** First entry of `markdown-blockquote-display-char` ("\u258c" "\u2503" ">"). */
+const BLOCKQUOTE_DISPLAY_CHAR = "\u258c"
 const URL_COMPOSE_CHAR = "↪"
 
+/** Heading sizes: a modular scale (Obsidian's h1..h6 tokens), so each level
+ *  is a clear step down but an H1 no longer dwarfs the text column. */
 const MARKDOWN_HEADER_FACES = [
-  ["markdown-header-face-1", 2.0],
-  ["markdown-header-face-2", 1.7],
-  ["markdown-header-face-3", 1.4],
-  ["markdown-header-face-4", 1.2],
-  ["markdown-header-face-5", 1.1],
+  ["markdown-header-face-1", 1.8],
+  ["markdown-header-face-2", 1.6],
+  ["markdown-header-face-3", 1.42],
+  ["markdown-header-face-4", 1.27],
+  ["markdown-header-face-5", 1.13],
   ["markdown-header-face-6", 1.0],
 ] as const
 
@@ -124,7 +145,13 @@ export type FoldRange = [number, number]
 const EMPTY_FOLD_RANGES: FoldRange[] = []
 type SubtreeCycle = "folded" | "children" | "subtree"
 type GlobalCycle = 1 | 2 | 3
-type DisplayFilterResult = { text: string; map: (n: number) => number; unmap?: (n: number) => number }
+type DisplayFilterResult = {
+  text: string
+  map: (n: number) => number
+  unmap?: (n: number) => number
+  lineKinds?: Array<string | undefined>
+  lineImages?: Array<InlineImage | undefined>
+}
 type MarkupOp = { start: number; end: number; display: string }
 type LineRenderMap = {
   text: string
@@ -143,6 +170,9 @@ type DisplayFilterCache = {
   ranges: FoldRange[]
   hideMarkup: boolean
   hideUrls: boolean
+  ruleWidth: number
+  pixel: boolean
+  images: string
   result: DisplayFilterResult
 }
 export type MarkdownDeps = {
@@ -158,10 +188,101 @@ function markdownHideMarkup(buffer: BufferModel): boolean {
   return getCustom<boolean>("markdown-hide-markup") ?? false
 }
 
+/**
+ * `markdown-display-inline-images` for a GUI text column: a line that is only
+ * an image link (`![alt](path)` or Obsidian `![[file.png]]`) shows the image,
+ * as `markdown-toggle-inline-images` does in Emacs. The line keeps its source
+ * text, so point, `C-n` and editing work on it as before; the row draws the
+ * picture below that text, and the text is dimmed.
+ *
+ * Lines inside code and front matter are skipped. Remote URLs are skipped:
+ * the display filter must not block on the network.
+ */
+function markdownInlineImages(buffer: BufferModel, lines: readonly string[], kinds: ReadonlyArray<string | undefined>): Map<number, InlineImage> | undefined {
+  if (!(getCustom<boolean>("markdown-display-inline-images") ?? true)) return undefined
+  const images = new Map<number, InlineImage>()
+  let misses = 0
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (kinds[i] || !line.includes("![")) continue
+    const found = findInlineImage(line, buffer.path)
+    if (found) images.set(i, found.image)
+    else if (/!\[/.test(line)) misses++
+  }
+  imageMisses.set(buffer, misses)
+  return images.size ? images : undefined
+}
+
+/** Unresolved image links per buffer at the last filter pass. */
+const imageMisses = new WeakMap<BufferModel, number>()
+
+/** Cache key part: the custom, plus the buffer file (relative paths resolve against it). */
+function markdownImagesKey(buffer: BufferModel): string {
+  // A pasted image can be written after its link: while a link is unresolved,
+  // look again every 2s (on the next redisplay) instead of caching the miss.
+  const retry = imageMisses.get(buffer) ? Math.floor(Date.now() / 2000) : 0
+  return `${getCustom<boolean>("markdown-display-inline-images") ?? true}|${buffer.path ?? ""}|${retry}`
+}
+
+/** Set by the display layer when a GUI host with font metrics draws this buffer. */
+function markdownPixelDisplay(buffer: BufferModel): boolean {
+  return buffer.locals.get(PIXEL_DISPLAY_LOCAL) === true && buffer.locals.get(MARKDOWN_VISUAL_FILL) === true
+}
+
+/**
+ * Row kind of each source line, for GUI row decorations: headings get space
+ * above, code gets a panel, quotes a left rule, `---` a rule, front matter a
+ * muted block. Plain paragraphs have no kind.
+ */
+function markdownLineKinds(lines: readonly string[], blocks: readonly FencedCodeBlock[]): Array<string | undefined> {
+  const kinds: Array<string | undefined> = new Array(lines.length)
+  const metadataEnd = markdownFrontMatterEnd(lines)
+  for (let i = 0; i <= metadataEnd; i++) kinds[i] = "frontmatter"
+  for (const block of blocks) {
+    kinds[block.openLine] = "code-fence-open"
+    for (let i = block.openLine + 1; i < block.closeLine; i++) kinds[i] = "code"
+    kinds[block.closeLine] = "code-fence-close"
+  }
+  for (let i = metadataEnd + 1; i < lines.length; i++) {
+    if (kinds[i]) continue
+    const line = lines[i]!
+    const atx = /^\s*(#{1,6})\s/.exec(line)
+    if (atx) kinds[i] = `heading-${atx[1]!.length}`
+    else if (/^(\s*)([-*_])\2{2,}\s*$/.test(line) && !(SETEXT_UNDERLINE_RE.test(line) && i > 0 && lines[i - 1]!.trim() && !kinds[i - 1])) kinds[i] = "hr"
+    else if (/^\s*>/.test(line)) kinds[i] = "quote"
+    else if (line.trim() && i + 1 < lines.length) {
+      const setext = SETEXT_UNDERLINE_RE.exec(lines[i + 1]!)
+      if (setext) {
+        kinds[i] = setext[2]!.startsWith("=") ? "heading-1" : "heading-2"
+        kinds[i + 1] = "setext-underline"
+      }
+    }
+  }
+  return kinds
+}
+
 function markdownHideUrls(buffer: BufferModel): boolean {
   const local = buffer.locals.get(MARKDOWN_HIDE_URLS)
   if (typeof local === "boolean") return local
   return getCustom<boolean>("markdown-hide-urls") ?? false
+}
+
+/**
+ * Width of a composed horizontal rule, in columns.
+ *
+ * Emacs uses `(1- (window-body-width))`. Under `visual-fill-column-mode` the
+ * body text is capped at `markdown-fill-column`, so the rule tracks that
+ * narrower column rather than the whole frame; otherwise a centred 100-column
+ * document grew a rule running the full window width.
+ */
+function markdownRuleWidth(buffer: BufferModel): number {
+  const cols = buffer.locals.get("window-body-cols") as number | undefined
+  if (cols == null) return MARKDOWN_DEFAULT_RULE_WIDTH
+  const capped = buffer.locals.get(MARKDOWN_VISUAL_FILL) === true
+    ? Math.min(cols, (buffer.locals.get(MARKDOWN_FILL_COLUMN) as number | undefined)
+      ?? getCustom<number>("markdown-fill-column") ?? 100)
+    : cols
+  return Math.max(3, capped - 1)
 }
 
 function setMarkdownHideMarkup(buffer: BufferModel, value: boolean): void {
@@ -440,12 +561,33 @@ function toggleBufferBoolean(
   return next
 }
 
+/**
+ * Last line of a metadata block (`---` YAML or `+++` TOML front matter) that
+ * opens the file, or -1. markdown-mode fontifies it as metadata
+ * (`markdown-fontify-metadata`), so a `key: value` line followed by the closing
+ * `---` is not a setext heading.
+ */
+export function markdownFrontMatterEnd(lines: readonly string[]): number {
+  const open = lines[0]?.trimEnd()
+  if (open !== "---" && open !== "+++") return -1
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!.trimEnd()
+    if (line === open || (open === "---" && line === "...")) return i
+  }
+  return -1
+}
+
 export function markdownParseHeadings(text: string): MarkdownHeading[] {
   const lines = text.split("\n")
   const out: MarkdownHeading[] = []
   let offset = 0
+  const metadataEnd = markdownFrontMatterEnd(lines)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
+    if (i <= metadataEnd) {
+      offset += line.length + 1
+      continue
+    }
     const atx = line.match(/^(\s*)(#{1,6})\s+(.*)$/)
     if (atx) {
       out.push({
@@ -730,7 +872,7 @@ function collectInlineMarkupHides(
   }
 }
 
-function collectMarkupHides(text: string, hideUrls: boolean, gfm = false): MarkupOp[] {
+function collectMarkupHides(text: string, hideUrls: boolean, gfm = false, ruleWidth = MARKDOWN_DEFAULT_RULE_WIDTH, pixel = false): MarkupOp[] {
   const ops: MarkupOp[] = []
   const lines = text.split("\n")
   const blocks = parseFencedCodeBlocks(text)
@@ -745,7 +887,8 @@ function collectMarkupHides(text: string, hideUrls: boolean, gfm = false): Marku
     if (block.bodyEnd > block.bodyStart) codeBodyRanges.push([block.bodyStart, block.bodyEnd])
   }
 
-  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+  const metadataEnd = markdownFrontMatterEnd(lines)
+  for (let lineIdx = metadataEnd + 1; lineIdx < lines.length; lineIdx++) {
     const line = lines[lineIdx]!
     const lineStart = lineStarts[lineIdx]!
     const lineEnd = lineStart + line.length
@@ -764,25 +907,68 @@ function collectMarkupHides(text: string, hideUrls: boolean, gfm = false): Marku
       pushMarkupHide(ops, lineStart, lineEnd, [])
     }
 
-    const bq = line.match(/^(\s*)(>+\s?)/)
+    const bq = line.match(/^(\s*)(>)(\s?)/)
     if (bq) {
+      // `markdown-blockquote-display-char` is ("\u258c" "\u2503" ">"): markdown-mode
+      // composes only the `>` itself to the first entry and leaves the space
+      // after it alone, so the body still starts one column in. Consuming that
+      // space here produced "\u258ca block quote line" instead of "\u258c a block quote line".
       const markerStart = lineStart + bq[1]!.length
-      pushMarkupHide(ops, markerStart, markerStart + bq[2]!.length, [], "")
+      // A pixel GUI draws the quote bar as a row border (`quote` row kind),
+      // which also runs down the wrapped continuation rows. The space after
+      // `>` goes too, so the text starts at the border's inset.
+      if (pixel) pushMarkupHide(ops, markerStart, markerStart + bq[2]!.length + bq[3]!.length, [])
+      else pushMarkupHide(ops, markerStart, markerStart + bq[2]!.length, [], BLOCKQUOTE_DISPLAY_CHAR)
     }
 
     const list = line.match(/^(\s*)([-*+]|\d+[.)])\s+/)
     if (list) {
       const markerStart = lineStart + list[1]!.length
       const markerEnd = lineStart + list[0]!.length
-      const bullet = /^\d/.test(list[2]!) ? `${list[2]} ` : `${LIST_BULLET} `
-      pushMarkupHide(ops, markerStart, markerEnd, [], bullet)
+      // `markdown-list-item-bullets` cycles by nesting depth, so a nested item
+      // does not repeat its parent's glyph. Depth follows the leading indent at
+      // `markdown-list-indent-width` (2) columns per level, as Emacs computes it.
+      const depth = Math.floor(list[1]!.replace(/\t/g, "  ").length / 2)
+      const bullets = pixel ? GUI_LIST_ITEM_BULLETS : LIST_ITEM_BULLETS
+      const bullet = /^\d/.test(list[2]!)
+        ? `${list[2]} `
+        : `${bullets[depth % bullets.length]} `
+      // A GUI draws a task item as just its checkbox, as Obsidian and Notion
+      // do: the bullet goes and `[ ]` becomes one box glyph. The two stay
+      // separate hides, so a click on the box maps into the `[ ]` source span
+      // and `markdown-toggle-gfm-checkbox` still finds it.
+      const box = pixel ? /^\[([ xX])\](?=\s|$)/.exec(line.slice(list[0]!.length)) : null
+      pushMarkupHide(ops, markerStart, markerEnd, [], box && !/^\d/.test(list[2]!) ? "" : bullet)
+      if (box) pushMarkupHide(ops, markerEnd, markerEnd + 3, [], box[1] === " " ? "\u2610" : "\u2611")
     }
 
-    if (/^(\s*)([-*_])\1{2,}\s*$/.test(line)) {
-      const hr = "─".repeat(Math.max(3, line.trim().length))
+    // The backreference must repeat the rule character (group 2), not the
+    // leading indent (group 1). With `\1` the branch never matched -- `\1` is
+    // usually "" and `""{2,}` succeeds only on an empty run -- so a `---` line
+    // fell through and rendered as literal dashes instead of a rule.
+    if (/^(\s*)([-*_])\2{2,}\s*$/.test(line)) {
+      // `markdown--fontify-hrs-view-mode`: the rule spans the window, it is not
+      // as wide as the source dashes. Emacs prefers an underlined empty line
+      // when the display supports `:extend`, and otherwise composes
+      // `(1- (window-body-width))` copies of the rule char. The DOM host has no
+      // `:extend`, so we take that second branch -- but at window width, not at
+      // `line.trim().length`, which drew a stubby 3-column rule.
+      // A pixel GUI draws the rule as the row's border, at the column's px
+      // width -- the `:extend` branch Emacs prefers. A run of box-drawing
+      // characters is sized in characters, so it overran a proportional column.
+      const hr = pixel ? "" : "\u2500".repeat(Math.max(3, ruleWidth))
       pushMarkupHide(ops, lineStart, lineEnd, [], hr)
     }
 
+    // Emacs stops here. `markdown-mode` propertizes inline markup with
+    // `invisible: markdown-markup`, but `markdown-hide-markup` only composes
+    // block-level markers -- it never adds `markdown-markup` to
+    // `buffer-invisibility-spec` unless `markdown-toggle-markup-hiding` runs.
+    // Checked live: with `markdown-hide-markup` t, `(invisible-p
+    // 'markdown-markup)` is nil and line 7 still displays its `**`, `` ` ``
+    // and `[link](url)` in full. Hiding them here was the "wonkiness": text
+    // reflowed as the cursor moved between lines.
+    if (!hideUrls) continue
     const protectedRanges = protectedInlineCodeRanges(line, lineStart)
     collectInlineMarkupHides(line, lineStart, hideUrls, protectedRanges, ops, gfm)
   }
@@ -823,14 +1009,21 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
   const ranges = foldedRanges(buffer)
   const hideMarkup = markdownHideMarkup(buffer)
   const hideUrls = markdownHideUrls(buffer)
-  if (!ranges.length && !hideMarkup) return null
+  if (!ranges.length && !hideMarkup && !markdownPixelDisplay(buffer)) return null
   const src = buffer.text
+  // Emacs sizes the rule from `(1- (window-body-width))`, so it has to be part
+  // of the cache key: a window resize changes the composed string.
+  const ruleWidth = markdownRuleWidth(buffer)
+  const pixel = markdownPixelDisplay(buffer)
   const cached = buffer.locals.get(MARKDOWN_FILTER_CACHE) as DisplayFilterCache | undefined
   if (cached
     && cached.text === src
     && cached.ranges === ranges
     && cached.hideMarkup === hideMarkup
-    && cached.hideUrls === hideUrls) return cached.result
+    && cached.hideUrls === hideUrls
+    && cached.ruleWidth === ruleWidth
+    && cached.pixel === pixel
+    && cached.images === markdownImagesKey(buffer)) return cached.result
 
   const lines = src.split("\n")
   const L = lines.length
@@ -839,15 +1032,17 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
   for (const [a, b] of ranges)
     for (let i = Math.max(0, a); i <= b && i < L; i++) foldHidden[i] = 1
 
-  const fenced = parseFencedCodeBlocks(src)
-  const markupOps = hideMarkup ? collectMarkupHides(src, hideUrls, markdownIsGfmMode(buffer)) : []
-  if (hideMarkup) {
-    for (const block of fenced) {
-      skipHidden[block.openLine] = 1
-      // Closing fence: drop the delimiter line but keep the paragraph break after the block.
-      skipHidden[block.closeLine] = 2
-    }
-  }
+  // (`parseFencedCodeBlocks` is no longer needed here: fence lines stay visible.)
+  const markupOps = hideMarkup ? collectMarkupHides(src, hideUrls, markdownIsGfmMode(buffer), ruleWidth, pixel) : []
+  const sourceKinds = pixel ? markdownLineKinds(lines, fencedCodeBlocksFor(buffer)) : undefined
+  const images = pixel && hideMarkup ? markdownInlineImages(buffer, lines, sourceKinds!) : undefined
+  const lineKinds: Array<string | undefined> | undefined = pixel ? [] : undefined
+  let lineImages: Array<InlineImage | undefined> | undefined
+  // Emacs keeps the ``` fence lines visible under `markdown-hide-markup`; only
+  // ATX `#`, list markers, `>` and `---` compose away. Verified in batch
+  // markdown-mode: line 24 still reads "```python". Deleting the two delimiter
+  // lines here also shifted every buffer line below a code block, so clicks and
+  // the caret landed on the wrong row.
 
   const bufStart: number[] = new Array(L)
   const lineLen: number[] = new Array(L)
@@ -876,6 +1071,7 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     if (skipHidden[i] === 2) {
       dispStart[i] = lastVisibleEnd
       const entry = { line: i, dispStart: dispLen, displayLen: 0 }
+      lineKinds?.push(undefined)
       displayLines.push(entry)
       lineDisplayMaps[i] = entry
       parts.push("\n")
@@ -896,6 +1092,8 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
       bufToDisp: rendered?.bufToDisp,
       dispToBuf: rendered?.dispToBuf,
     }
+    lineKinds?.push(images?.has(i) ? "image" : sourceKinds![i])
+    if (images?.has(i)) (lineImages ??= [])[lineKinds!.length - 1] = images.get(i)!
     displayLines.push(entry)
     lineDisplayMaps[i] = entry
     parts.push(renderedText)
@@ -934,12 +1132,16 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     const bufCol = entry.dispToBuf?.[col] ?? Math.min(col, lineLength)
     return Math.max(0, Math.min(lineStart + bufCol, src.length))
   }
-  const result = { text, map, unmap }
+  const result: DisplayFilterResult = lineKinds ? { text, map, unmap, lineKinds } : { text, map, unmap }
+  if (lineImages) result.lineImages = lineImages
   buffer.locals.set(MARKDOWN_FILTER_CACHE, {
+    pixel,
+    images: markdownImagesKey(buffer),
     text: src,
     ranges,
     hideMarkup,
     hideUrls,
+    ruleWidth,
     result,
   } satisfies DisplayFilterCache)
   return result
@@ -1123,8 +1325,13 @@ function markdownParseHeadingsInRange(text: string, range?: FontLockRange): Mark
   const lines = text.slice(start, range.end).split("\n")
   const headings: MarkdownHeading[] = []
   let offset = start
+  const metadataEnd = markdownFrontMatterEndIn(text)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
+    if (range.startLine + i <= metadataEnd) {
+      offset += line.length + 1
+      continue
+    }
     const atx = line.match(/^(\s*)(#{1,6})\s+(.*)$/)
     if (atx) {
       headings.push({
@@ -1149,6 +1356,15 @@ function markdownParseHeadingsInRange(text: string, range?: FontLockRange): Mark
     offset += line.length + 1
   }
   return headings
+}
+
+/** `markdownFrontMatterEnd` without splitting the whole buffer: a metadata
+ *  block is short, so scan only until it closes (or 200 lines). */
+function markdownFrontMatterEndIn(text: string): number {
+  if (!text.startsWith("---") && !text.startsWith("+++")) return -1
+  let end = 0
+  for (let n = 0; n < 200 && end !== -1; n++) end = text.indexOf("\n", end + 1)
+  return markdownFrontMatterEnd((end === -1 ? text : text.slice(0, end)).split("\n"))
 }
 
 function fenceLineSpan(buffer: BufferModel, line: number): TextSpan | null {
@@ -1229,9 +1445,95 @@ function markdownFontLock(buffer: BufferModel, range?: FontLockRange): TextSpan[
     }
   }
 
+  spans = overlayFrontMatterFaces(buffer, spans)
   if (gfm) spans.push(...markdownStrikethroughSpans(buffer.text, range, bodyRegions))
   spans = overlayMarkdownLinkFaces(buffer.text, spans, range, gfm, bodyRegions)
-  return overlayMarkdownHeaderFaces(buffer.text, spans, range)
+  spans = overlayMarkdownHeaderFaces(buffer.text, spans, range)
+  if (markdownPixelDisplay(buffer)) {
+    spans.push(...markdownFixedPitchSpans(buffer, spans, blocks, range))
+    spans.push(...markdownImageLinkSpans(buffer, range))
+  }
+  // Delimiters win over the span they delimit: tree-sitter's emphasis span
+  // covers its own `_`/`*`, and later spans win the merge, so without this
+  // the markers took the emphasis' italic. markdown-mode draws them in
+  // `markdown-markup-face` only.
+  spans.push(...spans.filter(span => String(span.face) === "markdown-markup").map(span => ({ ...span })))
+  return spans
+}
+
+/**
+ * A link that draws an inline image (`markdownInlineImages`) becomes a faint
+ * caption above it, as markup is. Only the link: text after it on the same
+ * line keeps its normal face. Appended last, so its colour wins.
+ */
+function markdownImageLinkSpans(buffer: BufferModel, range?: FontLockRange): TextSpan[] {
+  if (!markdownHideMarkup(buffer) || !(getCustom<boolean>("markdown-display-inline-images") ?? true)) return []
+  const out: TextSpan[] = []
+  const fromLine = range?.startLine ?? 0
+  const toLine = Math.min(buffer.lineCount, range?.endLine ?? buffer.lineCount)
+  for (let i = fromLine; i < toLine; i++) {
+    const [start, end] = buffer.lineBounds(i)
+    const line = buffer.text.slice(start, end)
+    if (!line.includes("![")) continue
+    const found = findInlineImage(line, buffer.path)
+    if (found) out.push({ start: start + found.start, end: start + found.end, face: "markdown-markup" as FaceName })
+  }
+  return out
+}
+
+/**
+ * Fixed-pitch runs for a GUI text column: fenced code, inline code and table
+ * rows. Appended after every other span, so their family wins the merge in
+ * `applyTheme` (every face inherits the proportional body family otherwise).
+ */
+function markdownFixedPitchSpans(buffer: BufferModel, spans: readonly TextSpan[], blocks: readonly FencedCodeBlock[], range?: FontLockRange): TextSpan[] {
+  const out: TextSpan[] = []
+  for (const block of blocks) {
+    const start = buffer.lineBounds(block.openLine)[0]
+    const end = buffer.lineBounds(block.closeLine)[1]
+    out.push({ start, end, face: "markdown-code-face" as FaceName })
+  }
+  for (const span of spans) {
+    if (String(span.face) === "markdown-inline-code") out.push({ start: span.start, end: span.end, face: "markdown-code-face" as FaceName })
+  }
+  const fromLine = range?.startLine ?? 0
+  const toLine = Math.min(buffer.lineCount, range?.endLine ?? buffer.lineCount)
+  for (let i = fromLine; i < toLine; i++) {
+    const [start, end] = buffer.lineBounds(i)
+    if (buffer.text.charCodeAt(start) === 124 /* | */ || /^\s+\|/.test(buffer.text.slice(start, Math.min(end, start + 8)))) {
+      out.push({ start, end, face: "markdown-table-face" as FaceName })
+    }
+  }
+  return out
+}
+
+/**
+ * Front matter as markdown-mode draws it: the `---` delimiters as markup,
+ * keys in `markdown-metadata-key-face`, values in `markdown-metadata-value-face`.
+ * Replaces whatever the parser put there (the tree-sitter grammar reads a
+ * `key: value` line followed by `---` as a setext heading).
+ */
+function overlayFrontMatterFaces(buffer: BufferModel, spans: TextSpan[]): TextSpan[] {
+  const end = markdownFrontMatterEndIn(buffer.text)
+  if (end < 0) return spans
+  const blockEnd = buffer.lineBounds(end)[1]
+  const out = spans.filter(span => span.start >= blockEnd || span.end <= 0)
+  for (let i = 0; i <= end; i++) {
+    const [start, stop] = buffer.lineBounds(i)
+    const line = buffer.text.slice(start, stop)
+    if (i === 0 || i === end) {
+      out.push({ start, end: stop, face: "markdown-markup" as FaceName })
+      continue
+    }
+    const key = /^(\s*[^:\s][^:]*:)(\s*)(.*)$/.exec(line)
+    if (!key) continue
+    out.push({ start, end: start + key[1]!.length, face: "markdown-metadata-key-face" as FaceName })
+    if (key[3]) {
+      const valueStart = start + key[1]!.length + key[2]!.length
+      out.push({ start: valueStart, end: stop, face: "markdown-metadata-value-face" as FaceName })
+    }
+  }
+  return out.sort((a, b) => a.start - b.start || a.end - b.end)
 }
 
 function overlayMarkdownLinkFaces(
@@ -1254,20 +1556,32 @@ function overlayMarkdownLinkFaces(
 }
 
 function applyMarkdownFaceRemap(buffer: BufferModel): void {
-  faceRemapAddRelative(buffer, "default", { family: VARIABLE_PITCH_FAMILY })
-  // Fences / fenced bodies font-lock as `string`, inline spans as
-  // `markdown-inline-code`; pin both to fixed-pitch so code stays monospace
-  // (and stays column-aligned) under the variable-pitch default remap.
-  faceRemapAddRelative(buffer, "string", { family: FIXED_PITCH_FAMILY })
-  faceRemapAddRelative(buffer, "markdown-inline-code", { family: FIXED_PITCH_FAMILY })
-  // Markup delimiters are the visual scaffolding around prose; keeping them
-  // monospace makes the leading `#`/`-`/`>` columns line up between lines
-  // instead of drifting with each proportional glyph width.
-  faceRemapAddRelative(buffer, "markdown-markup", { family: FIXED_PITCH_FAMILY })
+  // `:family` and `:height` together, matching the single Emacs remap. Leaving
+  // the height off kept the body at the 14pt code default while Emacs rendered
+  // 20pt, so every glyph was ~30% too small and the header scales multiplied
+  // the wrong base.
+  faceRemapAddRelative(buffer, "default", {
+    family: getCustom<string>("markdown-body-font-family") || VARIABLE_PITCH_FAMILY,
+    height: getCustom<number>("markdown-body-font-height") ?? 200,
+  })
+  // Emacs remaps only `default` (to Helvetica Neue) in `my-markdown-mode-hook`.
+  // `markdown-code-face` / `markdown-inline-code-face` / `markdown-markup-face`
+  // declare no `:family`, so in the real GUI code and markup inherit the
+  // proportional body font too -- verified with `font-at` inside a fenced block,
+  // which reports Helvetica Neue, not Menlo.
+  //
+  // Pinning those three to fixed-pitch here also split a single delimiter run
+  // across two fonts: tree-sitter emits an `emphasis_delimiter` per `*`, so the
+  // opening `**` of a bold span rendered one sans `*` next to one mono `*`.
+  // Keeping one family for the whole buffer matches Emacs and removes the seam.
   for (const [face, scale] of MARKDOWN_HEADER_FACES) {
     faceRemapAddRelative(buffer, face, { heightScale: scale })
   }
+  // `(display-line-numbers-mode 0)` in my-markdown-mode-hook. Both linum minor
+  // modes are `global: true`, so dropping the buffer's own entry never turned
+  // the gutter off -- the buffer-local opt-out is what Emacs actually sets.
   buffer.minorModes.delete("linum-mode")
+  buffer.locals.set("display-line-numbers", false)
   buffer.locals.set(MARKDOWN_FILL_COLUMN, getCustom<number>("markdown-fill-column") ?? 100)
   buffer.locals.set(MARKDOWN_VISUAL_FILL, true)
   buffer.locals.set("markdown-visual-fill-column-center-text", getCustom<boolean>("markdown-visual-fill-column-center-text") ?? true)
@@ -1277,6 +1591,9 @@ function applyMarkdownFaceRemap(buffer: BufferModel): void {
   // broke lines mid-word.
   buffer.locals.set("word-wrap", true)
   buffer.locals.set("adaptive-wrap-prefix-mode", true)
+  // Emacs `line-spacing` as a fraction: 1.35 x 1.15 = a 1.55 line box, the
+  // reading measure Obsidian and Notion use for prose. Terminals ignore it.
+  buffer.locals.set("line-spacing", 0.15)
 }
 
 function applyGfmFaceRemap(buffer: BufferModel): void {
@@ -2189,9 +2506,17 @@ export function install(editor: Editor, depsOrCtx: MarkdownDeps | PluginContext 
 
   // Headers are bold as well as scaled: at 1.0-1.2x, scale alone does not read
   // as a heading in a proportional font.
+  // H1 is bold (700); lower levels are semi-bold (600), so size carries the
+  // hierarchy. Terminals only have `bold`, which stays set on every level.
   for (const [name] of MARKDOWN_HEADER_FACES) {
-    defface(name, { bold: true }, "Markdown ATX/setext header face.")
+    defface(name, name.endsWith("-1") ? { bold: true } : { bold: true, weight: "semi-bold" }, "Markdown ATX/setext header face.")
   }
+  defface("markdown-metadata-key-face", { inherit: ["comment"], italic: false }, "Markdown front matter key.")
+  defface("markdown-metadata-value-face", {}, "Markdown front matter value.")
+  // Code and tables in a GUI text column: fixed-pitch, a step smaller, as in
+  // Obsidian and Notion. Only the display layer's pixel path applies these.
+  defface("markdown-code-face", { family: FIXED_PITCH_FAMILY, heightScale: 0.88 }, "Markdown code block and inline code font.")
+  defface("markdown-table-face", { family: FIXED_PITCH_FAMILY, heightScale: 0.88 }, "Markdown table font.")
   defface("markdown-emphasis", { italic: true }, "Markdown italic emphasis.")
   defface("markdown-strong", { bold: true }, "Markdown bold emphasis.")
   defface("markdown-link", { underline: true }, "Markdown link face.")
@@ -2201,7 +2526,7 @@ export function install(editor: Editor, depsOrCtx: MarkdownDeps | PluginContext 
   // the text carry the emphasis -- the same choice markdown-mode's
   // `markdown-markup-face` makes.
   defface("markdown-markup", { inherit: ["comment"], italic: false }, "Markdown markup delimiter face.")
-  defface("markdown-strikethrough", { underline: true }, "GFM strikethrough text face.")
+  defface("markdown-strikethrough", { strikeThrough: true }, "GFM strikethrough text face.")
   defface("markdown-inline-code", { inherit: ["string"] }, "Markdown inline `code` span.")
   defface("markdown-blockquote", { inherit: ["comment"], italic: true }, "Markdown blockquote body.")
   const keymap = new Keymap("markdown-map")

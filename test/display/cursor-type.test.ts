@@ -119,3 +119,162 @@ test("renderCaret draws a wide .block element for a box cursor", async () => {
     Object.assign(globals, saved)
   }
 })
+
+test("a box cursor covers the line cell instead of overhanging it", async () => {
+  // Screenshot bug: on a 2x markdown heading the block cursor hung below the
+  // text. `fontPx * CARET_HEIGHT_RATIO` (1.2) is sized for a bar, which wants
+  // to clear the glyph; Emacs sizes a box to the character cell -- measured
+  // there, the box on a 40px heading is one line cell tall, not 48px of caret
+  // floating over a 40px glyph.
+  const window = new Window({ url: "http://localhost" })
+  const globals = globalThis as Record<string, unknown>
+  const saved = {
+    window: globals.window,
+    document: globals.document,
+    HTMLElement: globals.HTMLElement,
+    requestAnimationFrame: globals.requestAnimationFrame,
+    getComputedStyle: globals.getComputedStyle,
+  }
+  globals.window = window
+  globals.document = window.document
+  globals.HTMLElement = window.HTMLElement
+  globals.requestAnimationFrame = undefined
+  // happy-dom does no layout, so stand in for the one metric the caret reads.
+  // `dom-frame` calls bare `getComputedStyle`, which resolves against the
+  // happy-dom window, so patch it there as well as on globalThis.
+  const FONT_PX = 40
+  const stubComputed = () => ({ fontSize: `${FONT_PX}px` })
+  globals.getComputedStyle = stubComputed as never
+  ;(window as unknown as Record<string, unknown>).getComputedStyle = stubComputed
+
+  try {
+    const mod = await import("../../src/display/dom-frame")
+    const { renderCaret, renderBodyRows, DOM_FRAME_LINE_HEIGHT_RATIO, CARET_HEIGHT_RATIO } = mod
+    const el = window.document.createElement("div") as unknown as HTMLElement
+    window.document.body.appendChild(el as never)
+
+    const heading = { chunks: [{ text: "AGENTS.md", height: FONT_PX * 10 }] }
+    const rows = renderBodyRows(el, heading as never)
+    renderCaret(el, rows, { row: 0, colOffset: 0, shape: "box" })
+    const boxEl = el.querySelector(".jemacs-caret") as HTMLElement
+    const boxHeight = Number.parseFloat(boxEl.style.height)
+
+    // Exactly one line cell. A box is *taller* than a bar on purpose -- it
+    // covers the cell, where the bar only clears the glyph -- so the bug was
+    // never "too tall in the abstract", it was using the bar's ratio, which is
+    // unrelated to the cell and left the box floating past the baseline.
+    expect(boxHeight).toBe(Math.round(FONT_PX * DOM_FRAME_LINE_HEIGHT_RATIO))
+    expect(boxHeight).not.toBe(Math.round(FONT_PX * CARET_HEIGHT_RATIO))
+
+    // The bar keeps its own ratio: this fix must not change it.
+    el.replaceChildren()
+    const barRows = renderBodyRows(el, heading as never)
+    renderCaret(el, barRows, { row: 0, colOffset: 0 })
+    const barEl = el.querySelector(".jemacs-caret") as HTMLElement
+    expect(Number.parseFloat(barEl.style.height)).toBe(Math.round(FONT_PX * CARET_HEIGHT_RATIO))
+  } finally {
+    Object.assign(globals, saved)
+  }
+})
+
+test("a box cursor is exactly as wide as the glyph it covers", async () => {
+  // Emacs ground truth, read with `font-get-glyphs` on the same buffer: the box
+  // is the glyph's advance width -- 30px on the 40px heading `H`, and only 4px
+  // on a narrow `i` at 20px. The previous assertion only checked "wider than a
+  // bar", which a fixed 0.6-em guess also satisfies, so it could not catch a
+  // box that ignored the glyph under point.
+  const window = new Window({ url: "http://localhost" })
+  const globals = globalThis as Record<string, unknown>
+  const saved = {
+    window: globals.window,
+    document: globals.document,
+    HTMLElement: globals.HTMLElement,
+    requestAnimationFrame: globals.requestAnimationFrame,
+  }
+  globals.window = window
+  globals.document = window.document
+  globals.HTMLElement = window.HTMLElement
+  globals.requestAnimationFrame = undefined
+
+  // happy-dom does no text layout, so supply the per-character advance widths
+  // Emacs measured. Range.getBoundingClientRect is what `charRectAtOffset` uses.
+  const GLYPH_PX: Record<string, number> = { H: 30, i: 4 }
+  const RangeProto = (window as unknown as { Range: { prototype: Record<string, unknown> } }).Range.prototype
+  const savedRect = RangeProto.getBoundingClientRect
+  RangeProto.getBoundingClientRect = function (this: Range) {
+    const ch = this.toString()
+    const width = GLYPH_PX[ch] ?? 0
+    return { width, height: 0, left: 0, top: 0, right: width, bottom: 0, x: 0, y: 0 } as DOMRect
+  }
+
+  try {
+    const { renderCaret, renderBodyRows } = await import("../../src/display/dom-frame")
+    const el = window.document.createElement("div") as unknown as HTMLElement
+    window.document.body.appendChild(el as never)
+
+    const widthAt = (colOffset: number): number => {
+      el.replaceChildren()
+      const rows = renderBodyRows(el, { chunks: [{ text: "Hi", height: 400 }] } as never)
+      renderCaret(el, rows, { row: 0, colOffset, shape: "box" })
+      return Number.parseFloat((el.querySelector(".jemacs-caret") as HTMLElement).style.width)
+    }
+
+    expect(widthAt(0)).toBe(GLYPH_PX.H)
+    // A narrow glyph must not inherit the wide one's box.
+    expect(widthAt(1)).toBe(GLYPH_PX.i)
+  } finally {
+    RangeProto.getBoundingClientRect = savedRect
+    Object.assign(globals, saved)
+  }
+})
+
+test("a box cursor is anchored to the top of its line, a bar is not", async () => {
+  // The reported bug was position, not size: a correctly-sized 54px box was
+  // pinned to the glyph's top and hung 28px below a 54px row, painting over the
+  // next line. Emacs anchors a box to the line -- `pos-visible-in-window-p` on
+  // a 40px heading reports y=0 -- so `top` must be the row's own top, with no
+  // centring term derived from the glyph rect.
+  const window = new Window({ url: "http://localhost" })
+  const globals = globalThis as Record<string, unknown>
+  const saved = {
+    window: globals.window,
+    document: globals.document,
+    HTMLElement: globals.HTMLElement,
+    requestAnimationFrame: globals.requestAnimationFrame,
+  }
+  globals.window = window
+  globals.document = window.document
+  globals.HTMLElement = window.HTMLElement
+  globals.requestAnimationFrame = undefined
+
+  // Give the glyph a rect that is *not* the line box, which is what a real
+  // Range reports and what misled the old centring math.
+  const GLYPH_TOP = 3
+  const GLYPH_HEIGHT = 19
+  const RangeProto = (window as unknown as { Range: { prototype: Record<string, unknown> } }).Range.prototype
+  const savedRect = RangeProto.getBoundingClientRect
+  RangeProto.getBoundingClientRect = () =>
+    ({ width: 30, height: GLYPH_HEIGHT, left: 0, top: GLYPH_TOP, right: 30, bottom: GLYPH_TOP + GLYPH_HEIGHT, x: 0, y: GLYPH_TOP }) as DOMRect
+
+  try {
+    const { renderCaret, renderBodyRows } = await import("../../src/display/dom-frame")
+    const el = window.document.createElement("div") as unknown as HTMLElement
+    window.document.body.appendChild(el as never)
+
+    const render = (shape?: "box"): number => {
+      el.replaceChildren()
+      const rows = renderBodyRows(el, { chunks: [{ text: "Plan", height: 400 }] } as never)
+      renderCaret(el, rows, { row: 0, colOffset: 0, ...(shape ? { shape } : {}) })
+      return Number.parseFloat((el.querySelector(".jemacs-caret") as HTMLElement).style.top)
+    }
+
+    // Box: the line top, never the glyph top that caused the overhang.
+    expect(render("box")).toBe(0)
+    expect(render("box")).not.toBe(GLYPH_TOP)
+    // Bar: unchanged, still positioned off the glyph it marks.
+    expect(render()).toBeGreaterThan(0)
+  } finally {
+    RangeProto.getBoundingClientRect = savedRect
+    Object.assign(globals, saved)
+  }
+})

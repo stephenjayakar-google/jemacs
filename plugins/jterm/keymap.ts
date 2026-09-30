@@ -4,6 +4,11 @@ import { Keymap, normalizeSequence } from "../../src/kernel/keymap"
  *  prefix escape. Installed as `editor.overridingTerminalLocalMap` so nothing
  *  falls through to global editing commands (C-k → kill-line, etc.). */
 export class JTermRawMap extends Keymap {
+  /** Char-mode belongs to one buffer, but `overridingTerminalLocalMap` is
+   *  editor-global. The plugin sets this predicate to "the jterm buffer is the
+   *  current buffer". When the user selects another window, every lookup misses
+   *  and the normal mode/global maps apply to that other buffer. */
+  guard: (() => boolean) | null = null
   constructor() {
     super("jterm-raw-map")
     this.bind("C-c C-c", "jterm-interrupt")
@@ -13,8 +18,15 @@ export class JTermRawMap extends Keymap {
     this.bind("C-c C-y", "jterm-yank")
     this.bind("C-c C-l", "jterm-clear-scrollback")
     this.bind("C-c C-r", "jterm-reset-cursor-point")
+    // Window switching must stay reachable in char-mode: a terminal never needs
+    // C-tab, and losing it traps the user inside the jterm window.
+    this.bind("C-tab", "other-window")
+    for (const key of ["C-S-tab", "C-S-iso-lefttab", "C-iso-lefttab", "C-backtab"]) {
+      this.bind(key, "previous-window-any-frame")
+    }
   }
   override get(seq: string): string | undefined {
+    if (this.guard && !this.guard()) return undefined
     const n = normalizeSequence(seq)
     const explicit = super.get(n)
     if (explicit) return explicit
@@ -27,6 +39,7 @@ export class JTermRawMap extends Keymap {
     return undefined
   }
   override hasPrefix(seq: string): boolean {
+    if (this.guard && !this.guard()) return false
     return normalizeSequence(seq) === "C-c" || super.hasPrefix(seq)
   }
 }

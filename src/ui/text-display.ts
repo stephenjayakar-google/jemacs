@@ -1,10 +1,14 @@
+import { CURSOR_GLYPH, CURSOR_MARKER_ZERO_WIDTH } from "../display/themed-text"
+
 /** Place the cursor marker in `text` at `point`.
  *
  *  `mode` is "overwrite" for char-grid hosts, where the block glyph occupies
  *  the cell of the character under point (that cell can only hold one glyph).
  *  Hosts that draw their own caret pass "insert": the marker is a placeholder
  *  they strip back out, so it must not consume the character it marks --
- *  overwriting there deletes a character from the rendered buffer. */
+ *  overwriting there deletes a character from the rendered buffer. That marker
+ *  is also zero-width, because it is still present while lines are wrapped and
+ *  a one-column placeholder moved the wrap boundary. */
 export function textWithCursor(
   text: string,
   point: number,
@@ -13,9 +17,10 @@ export function textWithCursor(
   const cursorPoint = Math.max(0, Math.min(point, text.length))
   const underCursor = text[cursorPoint]
   if (mode === "overwrite" && underCursor && underCursor !== "\n") {
-    return text.slice(0, cursorPoint) + "█" + text.slice(cursorPoint + 1)
+    return text.slice(0, cursorPoint) + CURSOR_GLYPH + text.slice(cursorPoint + 1)
   }
-  return text.slice(0, cursorPoint) + "█" + text.slice(cursorPoint)
+  const marker = mode === "insert" ? CURSOR_MARKER_ZERO_WIDTH : CURSOR_GLYPH
+  return text.slice(0, cursorPoint) + marker + text.slice(cursorPoint)
 }
 
 /** Offsets of the active region inside the string `textWithCursor` returns.

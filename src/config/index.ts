@@ -18,6 +18,7 @@ import { installFillCommands } from "../core/fill"
 import { installDiffCommands } from "../modes/diff"
 import { installOutlineCommands } from "../modes/outline"
 import { installPythonShellCommands } from "../modes/python-shell"
+import { installTexCommands } from "../modes/tex-commands"
 
 export { bindGuiKeybindings } from "./default-bindings"
 export { installDefaultHooks, installLspDeferredHooks } from "./install-hooks"
@@ -33,6 +34,7 @@ export function installDefaultConfig(editor: Editor): Evaluator {
   installDiffCommands(editor)
   installOutlineCommands(editor)
   installPythonShellCommands(editor)
+  installTexCommands(editor)
   installLinumMode()
   installTextScaleMode()
   installMinorModeCommands(editor)

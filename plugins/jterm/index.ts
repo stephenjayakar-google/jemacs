@@ -165,6 +165,9 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
       const wrapped = bracketed ? `\x1b[200~${text}\x1b[201~` : text
       session.writeRaw(wrapped)
     })
+    // The override is editor-global, so gate it on this buffer staying current.
+    // Selecting another window must restore that buffer's own keymaps.
+    jtermRawMap.guard = () => editor.currentBuffer === buffer && sessions.get(buffer)?.charMode === true
     editor.overridingTerminalLocalMap = jtermRawMap
     void editor.changed("jterm-char-mode")
   }, "Switch the current jterm buffer to terminal character mode.")
@@ -180,7 +183,10 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
     buffer.readOnly = true
     editor.enterMode(buffer, JTERM_COPY_MODE)
     buffer.locals.delete(PASTE_HANDLER_LOCAL)
-    if (editor.overridingTerminalLocalMap === jtermRawMap) editor.overridingTerminalLocalMap = null
+    if (editor.overridingTerminalLocalMap === jtermRawMap) {
+      editor.overridingTerminalLocalMap = null
+      jtermRawMap.guard = null
+    }
     // Hide the cell-grid surface so the pane renders the text mirror in copy-mode.
     buffer.locals.delete(TERMINAL_SURFACE_LOCAL)
     void editor.changed("jterm-copy-mode")
@@ -201,7 +207,10 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
   // so keyboard-quit must always be able to tear it down.
   ctx.advice("keyboard-quit", {
     after: ({ editor }) => {
-      if (editor.overridingTerminalLocalMap === jtermRawMap) editor.overridingTerminalLocalMap = null
+      if (editor.overridingTerminalLocalMap === jtermRawMap) {
+        editor.overridingTerminalLocalMap = null
+        jtermRawMap.guard = null
+      }
       const buf = editor.activeBuffer
       if (buf?.locals.has(PASTE_HANDLER_LOCAL)) {
         // user is mid-paste-route in char-mode: fall back to copy-mode
@@ -306,7 +315,10 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
     if (!session) return
     session.dispose()
     sessions.delete(buffer)
-    if (editor.overridingTerminalLocalMap === jtermRawMap) editor.overridingTerminalLocalMap = null
+    if (editor.overridingTerminalLocalMap === jtermRawMap) {
+      editor.overridingTerminalLocalMap = null
+      jtermRawMap.guard = null
+    }
   })
 
   // Editor-wide cleanup: C-x C-c (quit) used to leak PTY processes because

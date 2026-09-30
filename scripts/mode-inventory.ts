@@ -104,6 +104,8 @@ export const CURATED_GNU_MODES = uniqueSorted([
   "sgml-mode",
   "sh-mode",
   "shell-mode",
+  "sql-mode",
+  "sql-ts-mode",
   "tabulated-list-mode",
   "term",
   "tex-mode",

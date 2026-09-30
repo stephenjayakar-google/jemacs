@@ -22,6 +22,13 @@ export type LineWrapOptions = {
   toLine?: number
   /** Display-layer lines (may differ from buffer when markup is hidden). */
   displayLines?: readonly string[]
+  /** Screen rows per line from pixel wrapping (`pixel-wrap.ts`). Overrides the
+   *  character-count estimate for every line it covers. */
+  rowCounts?: ReadonlyMap<number, number>
+  /** Px added above a line (row decorations), counted into its cost. */
+  extraPx?: ReadonlyMap<number, number>
+  /** Line box as a multiple of font size; defaults to `DOM_FRAME_LINE_HEIGHT_RATIO`. */
+  lineHeight?: number
   /** Display-layer line lengths (legacy fallback when text is unavailable). */
   displayLineLengths?: readonly number[]
 }
@@ -119,13 +126,17 @@ export function computeLineVisualRows(
   const rows: number[] = new Array(L)
   for (let i = fromLine; i <= toLine; i++) {
     const line = lines[i]!
-    let cost = (maxPx[i]! * DOM_FRAME_LINE_HEIGHT_RATIO) / rowPx
-    if (wrap?.wrapCols != null) {
+    let cost = (maxPx[i]! * (wrap?.lineHeight ?? DOM_FRAME_LINE_HEIGHT_RATIO)) / rowPx
+    const pixelRows = wrap?.rowCounts?.get(i)
+    if (pixelRows != null) {
+      cost *= pixelRows
+    } else if (wrap?.wrapCols != null) {
       const displayLine = wrap.displayLines?.[i]
       const lineForWrap = displayLine ?? wrap.displayLineLengths?.[i] ?? line.length
       cost *= wrapRowsForContent(lineForWrap, wrap.wrapCols, wrap.gutterPrefixLen ?? 0, wrap.wordWrap, wrap.adaptiveWrap)
     }
-    rows[i] = cost
+    const extra = wrap?.extraPx?.get(i)
+    rows[i] = extra ? cost + extra / rowPx : cost
   }
   return rows
 }

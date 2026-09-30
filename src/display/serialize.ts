@@ -1,19 +1,9 @@
-import type { ChildFrameModel, DisplayModel, TableSurfaceModel, WebSurfaceModel, WindowDisplayNode } from "./protocol"
+import type { RowDecorationModel, ChildFrameModel, DisplayModel, TableSurfaceModel, WebSurfaceModel, WindowDisplayNode } from "./protocol"
 import type { TerminalSurfaceModel } from "./terminal-surface"
-import type { ThemedText } from "./themed-text"
+import type { ThemedChunk, ThemedText } from "./themed-text"
 
 export type SerializedThemedText = {
-  chunks: Array<{
-    text: string
-    fg?: string
-    bg?: string
-    bold?: boolean
-    italic?: boolean
-    underline?: boolean
-    family?: string
-    height?: number
-    heightScale?: number
-  }>
+  chunks: Array<ThemedChunk>
 }
 export type SerializedDisplayModel = {
   title: SerializedThemedText
@@ -69,6 +59,8 @@ export type SerializedPane = {
   syncText: string
   syncPoint: number
   textScale: number
+  textColumn?: { leftPx: number; widthPx: number; lineHeight: number }
+  rowDecorations?: Array<RowDecorationModel | null>
 }
 
 export function serializeThemedText(text: ThemedText): SerializedThemedText {
@@ -142,6 +134,8 @@ function serializePane(pane: DisplayModel["childFrames"][number]["pane"]): Seria
     syncText: pane.syncText,
     syncPoint: pane.syncPoint,
     textScale: pane.textScale,
+    ...(pane.textColumn ? { textColumn: { ...pane.textColumn } } : {}),
+    ...(pane.rowDecorations ? { rowDecorations: pane.rowDecorations.map(d => d && { ...d }) } : {}),
   }
 }
 

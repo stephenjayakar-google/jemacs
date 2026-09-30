@@ -13,6 +13,13 @@ export function linumActiveFor(editor: Editor, buffer: BufferModel): boolean {
 }
 
 export function lineNumbersActiveFor(editor: Editor, buffer: BufferModel): boolean {
+  // Emacs `(display-line-numbers-mode 0)` in a mode hook sets the buffer-local
+  // `display-line-numbers` to nil, which wins over the globalized mode. Both
+  // linum minor modes here are `global: true`, so a buffer that wants the
+  // gutter off cannot express that by removing itself from `buffer.minorModes`
+  // -- `isMinorModeEnabled` short-circuits on `globalMinorModes` first. Without
+  // this opt-out, markdown-mode's own disable was a silent no-op.
+  if (buffer.locals.get("display-line-numbers") === false) return false
   const enabled = editor.isMinorModeEnabled("display-line-numbers-mode", buffer)
     || editor.isMinorModeEnabled("linum-mode", buffer)
   return enabled && (buffer.kind === "file"

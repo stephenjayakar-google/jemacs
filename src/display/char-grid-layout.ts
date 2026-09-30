@@ -10,9 +10,11 @@ import type { ChildFrameModel, DisplayModel, WindowDisplayNode, WindowPaneModel 
 import { bufferHighlightSpans } from "./buffer-highlights"
 import { applyTheme, type Theme } from "./theme"
 import { terminalSurfaceToThemedText, type TerminalSurfaceModel } from "./terminal-surface"
-import { CURSOR_GLYPH, extractCursorMarker, plainThemedText, unitalicizeCharAt, type ThemedChunk, type ThemedText } from "./themed-text"
+import { CURSOR_GLYPH, CURSOR_MARKER_ZERO_WIDTH, extractCursorMarker, plainThemedText, sameChunkStyle, unitalicizeCharAt, type ThemedChunk, type ThemedText } from "./themed-text"
 import { contentAreaLines, windowBodyLines, type ViewportSize } from "./viewport"
 import { paneWrapLayoutFor, wrapBodyRowsWithMap } from "./display-wrap"
+import { imageBox, pixelRowCounts, pixelWrapFor, rowDecoration, type DisplayImage, type PixelWrapLayout } from "./pixel-wrap"
+import type { RowDecorationModel } from "./protocol"
 import {
   computeLineVisualRows,
   computeWrappedLineRows,
@@ -208,6 +210,19 @@ function layoutLeafPane(
   )
   const useVisualWeights = hostCapabilities?.perFaceFonts === true
   const lineRange = visualRowLineRange(startLine, cursorLine, maxLines, lineCount)
+  const pixel = pixelWrapFor({
+    locals: pane.locals,
+    cols: availableCols,
+    showGutter,
+    perFaceFonts: useVisualWeights,
+    metrics: hostCapabilities?.fontMetrics,
+    theme: logical.theme,
+    buffer: pane.buffer,
+    textScale: pane.textScale,
+  })
+  const lineKinds = pixel ? pane.displayLineKinds : undefined
+  const lineImages = pixel ? pane.displayLineImages : undefined
+  const pixelCosts = pixel ? pixelRowCounts(pixel, dLines, dFontLockSpans, lineRange.fromLine, lineRange.toLine, lineKinds, lineImages) : undefined
   const wrappedRows = useVisualWeights ? undefined : computeWrappedLineRows(dLines, {
     wrapCols: wrapLayout.wrapCols,
     gutterPrefixLen: wrapLayout.gutterPrefixLen,
@@ -225,6 +240,7 @@ function layoutLeafPane(
       displayLines: dLines,
       fromLine: lineRange.fromLine,
       toLine: lineRange.toLine,
+      ...(pixelCosts ? { ...pixelCosts, lineHeight: pixel!.lineHeight } : {}),
     })
     : hasNonUnitVisualRows(wrappedRows) ? wrappedRows : undefined
   if (pane.selected) {
@@ -272,13 +288,22 @@ function layoutLeafPane(
       showCursor: pane.selected,
       cursorMode: hostDrawsCaret ? "insert" : "overwrite",
     }),
-    wrapCols,
+    pixel ? undefined : wrapCols,
     gutter,
     maxLines,
     keepWrappedTop,
     wordWrap,
-    pane.selected ? CURSOR_GLYPH : undefined,
+    // Which marker rides through wrapping: the block glyph for char-grid hosts,
+    // the zero-width placeholder for hosts that draw their own caret.
+    pane.selected ? (hostDrawsCaret ? CURSOR_MARKER_ZERO_WIDTH : CURSOR_GLYPH) : undefined,
     adaptiveWrap,
+    pixel && {
+      ...pixel,
+      lineInsetPx: (line: number) => {
+        const d = rowDecoration(pixel, lineKinds?.[startLine + line])
+        return d.insetPx + d.insetRightPx
+      },
+    },
   )
   let body = wrapped.text
   // Without this a click below a wrapped line reads its physical row as a
@@ -286,7 +311,14 @@ function layoutLeafPane(
   // continuation row above it). Omitted when no line wrapped, so the common
   // case keeps the previous (identical) mapping and a smaller wire payload.
   if (wrapped.rows.some((r, i) => r.line !== i)) clickState.wrappedRows = wrapped.rows
-  if (visualFill?.center && columnWidth != null && contentWidth != null && columnWidth < contentWidth) {
+  const rowDecorations = pixel && lineKinds
+    ? rowDecorationsFor(pixel, wrapped.rows, line => lineKinds[startLine + line], line => lineImages?.[startLine + line])
+    : undefined
+  // A pixel-wrapped column is centred by the host in px (`textColumn`), not by
+  // leading spaces: a space in a proportional font is not one column wide, so
+  // pad spaces only approximated the centre, and rows the browser wrapped
+  // itself lost the margin entirely.
+  if (!pixel && visualFill?.center && columnWidth != null && contentWidth != null && columnWidth < contentWidth) {
     const leftMargin = Math.floor((contentWidth - columnWidth) / 2)
     if (leftMargin > 0) {
       clickState.leftPadding = leftMargin
@@ -298,7 +330,7 @@ function layoutLeafPane(
   // the row/col are the ones actually rendered.
   let cursor: { row: number; colOffset: number; shape?: "bar" | "box" } | undefined
   if (pane.selected && hostDrawsCaret) {
-    const extracted = extractCursorMarker(body)
+    const extracted = extractCursorMarker(body, CURSOR_MARKER_ZERO_WIDTH)
     if (extracted) {
       body = extracted.text
       // `shape` omitted for the default bar so the wire model stays minimal.
@@ -326,6 +358,8 @@ function layoutLeafPane(
     syncPoint: pane.point,
     syncSpans,
     textScale: pane.textScale,
+    ...(pixel ? { textColumn: { leftPx: pixel.leftPx, widthPx: pixel.columnPx, lineHeight: pixel.lineHeight } } : {}),
+    ...(rowDecorations?.some(Boolean) ? { rowDecorations } : {}),
   }
 }
 
@@ -410,7 +444,7 @@ function padBodyLines(body: ThemedText, leftPad: string): ThemedText {
   let lastIsPad = true
   const append = (style: ThemedChunk, ch: string) => {
     const last = out[out.length - 1]!
-    if (!lastIsPad && themedChunkStyleEqual(last, style) && !last.text.endsWith("\n")) {
+    if (!lastIsPad && sameChunkStyle(last, style) && !last.text.endsWith("\n")) {
       last.text += ch
       return
     }
@@ -429,10 +463,33 @@ function padBodyLines(body: ThemedText, leftPad: string): ThemedText {
   return { chunks: out }
 }
 
-function themedChunkStyleEqual(a: ThemedChunk, b: ThemedChunk): boolean {
-  return a.fg === b.fg && a.bg === b.bg && a.bold === b.bold && a.italic === b.italic
-    && a.underline === b.underline && a.family === b.family && a.height === b.height
-    && a.heightScale === b.heightScale
+
+/** One entry per body row: its line's kind and px geometry, or null for a plain row. */
+function rowDecorationsFor(
+  pixel: PixelWrapLayout,
+  rows: ReadonlyArray<{ line: number; start: number }>,
+  kindOf: (line: number) => string | undefined,
+  imageOf: (line: number) => DisplayImage | undefined = () => undefined,
+): Array<RowDecorationModel | null> {
+  return rows.map((row, i) => {
+    const kind = kindOf(row.line)
+    if (!kind) return null
+    const d = rowDecoration(pixel, kind)
+    const image = imageOf(row.line)
+    // By offset, not index: the top visible row can be a continuation of a
+    // line that starts above the window, and that row gets no top padding.
+    const first = row.start === 0
+    const last = i === rows.length - 1 || rows[i + 1]!.line !== row.line
+    return {
+      kind,
+      first,
+      last,
+      ...(d.insetPx ? { insetPx: d.insetPx } : {}),
+      ...(d.insetRightPx ? { insetRightPx: d.insetRightPx } : {}),
+      ...(d.padTopPx && first ? { padTopPx: d.padTopPx } : {}),
+      ...(last && image ? { image: { src: image.src, ...imageBox(pixel, image) } } : {}),
+    }
+  })
 }
 
 function themedCompletions(display: MinibufferCompletionDisplay | null, theme: Theme): ThemedText {

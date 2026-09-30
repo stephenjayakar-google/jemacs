@@ -1,4 +1,4 @@
-import type { ThemedChunk, ThemedText } from "./themed-text"
+import { sameChunkStyle, type ThemedChunk, type ThemedText } from "./themed-text"
 
 export const TERMINAL_SURFACE_LOCAL = "terminal-surface"
 
@@ -24,7 +24,7 @@ export function terminalSurfaceToThemedText(surface: TerminalSurfaceModel): Them
   const chunks: ThemedChunk[] = []
   const push = (chunk: ThemedChunk) => {
     const last = chunks.at(-1)
-    if (last && sameStyle(last, chunk)) {
+    if (last && sameChunkStyle(last, chunk)) {
       last.text += chunk.text
       return
     }
@@ -51,9 +51,3 @@ export function terminalSurfaceToThemedText(surface: TerminalSurfaceModel): Them
   return { chunks }
 }
 
-function sameStyle(a: ThemedChunk, b: ThemedChunk): boolean {
-  return a.fg === b.fg && a.bg === b.bg && a.bold === b.bold
-    && a.italic === b.italic && a.underline === b.underline
-    && a.family === b.family && a.height === b.height
-    && a.heightScale === b.heightScale
-}
