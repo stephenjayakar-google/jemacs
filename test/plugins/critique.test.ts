@@ -4,6 +4,9 @@ import { displayRows, keySeq } from "../harness"
 import { getCustom } from "../../src/runtime/custom"
 import { createPluginContext } from "../../src/runtime/plugin-context"
 import { wrapWords } from "../../src/display/right-margin"
+import { buildDisplayModel } from "../../src/display/build-display-model"
+import { FontMetricsTable } from "../../src/display/font-metrics"
+import type { WindowPaneModel } from "../../src/display/protocol"
 import { install as installMarkdown } from "../../plugins/markdown"
 import {
   install,
@@ -207,6 +210,45 @@ describe("display", () => {
   test("narrow windows drop the margin instead of crushing the text", () => {
     const { editor } = setup("The ==fox==%%c%% runs.\n")
     expect(displayRows(editor, { rows: 20, cols: 50 }).join("\n")).not.toContain("│")
+  })
+})
+
+describe("GUI text column (pixel wrap)", () => {
+  class EmMetrics extends FontMetricsTable {
+    override advance(ch: string, spec: Parameters<FontMetricsTable["advance"]>[1]): number {
+      return ch === "\u200b" ? 0 : spec.px * 0.6
+    }
+    override averageWidth(spec: Parameters<FontMetricsTable["averageWidth"]>[0]): number {
+      return spec.px * 0.6
+    }
+  }
+  const gui = { unit: "pixels" as const, mouse: true, clipboard: true, osc52: false, perFaceFonts: true, fontMetrics: new EmMetrics() }
+  const VIEW = { rows: 30, cols: 160 }
+  const pane = (editor: ReturnType<typeof setup>["editor"]): WindowPaneModel => {
+    const model = buildDisplayModel(editor, { lastMessage: "", viewport: VIEW, hostCapabilities: gui })
+    return (model.windows.kind === "leaf" ? model.windows.pane : null)!
+  }
+
+  test("the margin narrows the column and notes ride as margin chunks", () => {
+    const { editor, buffer } = setup("# T\n\nThe ==fox==%%too quick%% runs.\n")
+    const withMargin = pane(editor)
+    editor.disableMinorMode(CRITIQUE_MODE, { buffer })
+    const without = pane(editor)
+    expect(withMargin.textColumn).toBeDefined()
+    expect(withMargin.textColumn!.leftPx + withMargin.textColumn!.widthPx)
+      .toBeLessThan(without.textColumn!.leftPx + without.textColumn!.widthPx)
+    const notes = withMargin.body.chunks.filter(c => c.margin).map(c => c.text.trim())
+    expect(notes).toEqual(["│ • too quick"])
+    expect(without.body.chunks.some(c => c.margin)).toBe(false)
+  })
+
+  test("window-body-cols excludes the margin, like Emacs window-body-width", () => {
+    const { editor, buffer } = setup("The ==fox==%%c%% runs.\n")
+    pane(editor)
+    expect(buffer.locals.get("window-body-cols")).toBe(VIEW.cols - 36)
+    editor.disableMinorMode(CRITIQUE_MODE, { buffer })
+    pane(editor)
+    expect(buffer.locals.get("window-body-cols")).toBe(VIEW.cols)
   })
 })
 
