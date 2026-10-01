@@ -12,7 +12,7 @@ Comments are single-line. Obsidian's multi-line `%%` block comments are left alo
 
 ## Features
 
-- **Comments panel** (ribbon icon or "Critique: Open comments panel"): lists the active note's comments with the quoted text. Click a card to jump to it. Each card has Edit and Resolve buttons; Resolve keeps the text and drops the comment.
+- **Comments panel** (ribbon icon or "Critique: Open comments panel"): lists the active note's comments with the quoted text. Click a card to jump to it. Each card has Edit, Reply and Resolve buttons. Reply adds another comment right after this one; Resolve keeps the text and drops the comment.
 - **Critique: Comment on selection**: wraps the selection, or adds a point comment at the cursor.
 - **Critique: Go to next / previous comment**.
 - A setting picks native or CriticMarkup syntax for new comments.
@@ -38,7 +38,10 @@ Then enable "Critique" under Settings → Community plugins.
 | `C-c ;` | `critique-comment`: comment on region / edit comment at point / point comment |
 | `C-c ]` / `C-c [` | next / previous comment |
 | `C-c /` | `critique-resolve-comment` |
+| `C-c =` | `critique-reply-comment`: add another comment under the one at point |
 | `C-c C-x ;` | `critique-toggle-inline-comments`: show or hide the raw markup |
 | | `critique-list-comments`: jump with completion |
+
+The margin notes are clickable too: click a note's text to edit it in the minibuffer, `√` to resolve it, `+` to add another comment under it. This works in the terminal (with mouse support) and in the GUI.
 
 Customize with `critique-syntax` (`"obsidian"` or `"critic"`), `critique-margin-width`, `critique-hide-inline-comments` and `critique-auto-enable`.

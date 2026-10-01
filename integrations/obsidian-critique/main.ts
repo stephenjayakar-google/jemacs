@@ -141,9 +141,10 @@ export default class CritiquePlugin extends Plugin {
     else view.setEphemeralState({ line: c.line })
   }
 
-  /** Rewrite a comment in the target file. `next` null resolves it (keeps the
-   *  highlighted text, drops the comment). */
-  async rewrite(c: CritiqueComment, next: string | null): Promise<void> {
+  /** Rewrite a comment in the target file: `edit` replaces its text, `resolve`
+   *  drops it (keeping the highlighted text), `reply` adds another comment
+   *  right after it, the same markup jemacs' `critique-reply-comment` writes. */
+  async rewrite(c: CritiqueComment, change: { kind: "edit" | "reply"; text: string } | { kind: "resolve" }): Promise<void> {
     const t = await this.targetText()
     if (!t) return
     // Re-parse so stale offsets from an old render can't clobber an edit.
@@ -153,7 +154,9 @@ export default class CritiquePlugin extends Plugin {
       this.refreshViews()
       return
     }
-    const replacement = next == null ? fresh.quote : formatCritiqueComment(fresh.quote || null, next, fresh.syntax)
+    const replacement = change.kind === "resolve" ? fresh.quote
+      : change.kind === "edit" ? formatCritiqueComment(fresh.quote || null, change.text, fresh.syntax)
+      : t.text.slice(fresh.start, fresh.end) + formatCritiqueComment(null, change.text, fresh.syntax)
     if (t.view.getMode() === "source") {
       const editor = t.view.editor
       editor.replaceRange(replacement, editor.offsetToPos(fresh.start), editor.offsetToPos(fresh.end))
@@ -222,12 +225,17 @@ class CritiqueView extends ItemView {
     const edit = actions.createEl("button", { text: "Edit" })
     edit.addEventListener("click", evt => {
       evt.stopPropagation()
-      new CommentModal(this.app, "Edit comment", c.text, text => void this.plugin.rewrite(c, text)).open()
+      new CommentModal(this.app, "Edit comment", c.text, text => void this.plugin.rewrite(c, { kind: "edit", text })).open()
+    })
+    const reply = actions.createEl("button", { text: "Reply" })
+    reply.addEventListener("click", evt => {
+      evt.stopPropagation()
+      new CommentModal(this.app, "Reply", "", text => void this.plugin.rewrite(c, { kind: "reply", text })).open()
     })
     const resolve = actions.createEl("button", { text: "Resolve" })
     resolve.addEventListener("click", evt => {
       evt.stopPropagation()
-      void this.plugin.rewrite(c, null)
+      void this.plugin.rewrite(c, { kind: "resolve" })
     })
   }
 }
