@@ -4,6 +4,9 @@ import { displayRows, keySeq } from "../harness"
 import { getCustom } from "../../src/runtime/custom"
 import { createPluginContext } from "../../src/runtime/plugin-context"
 import { wrapWords } from "../../src/display/right-margin"
+import { bindJemacsHost } from "../../src/run"
+import type { UiHost } from "../../src/display/protocol"
+import { themedTextPlain } from "../../src/display/themed-text"
 import { buildDisplayModel } from "../../src/display/build-display-model"
 import { FontMetricsTable } from "../../src/display/font-metrics"
 import type { WindowPaneModel } from "../../src/display/protocol"
@@ -171,9 +174,9 @@ describe("display", () => {
     expect(foxRow).toBeDefined()
     expect(foxRow).not.toContain("%%")
     expect(foxRow).not.toContain("==")
-    expect(foxRow.trimEnd()).toMatch(/│ • too quick$/)
+    expect(foxRow.trimEnd()).toMatch(/│ • too quick +√ \+$/)
     expect(foxRow.indexOf("│")).toBe(VIEW.cols - 36 + 1)
-    expect(rows.find(r => r.includes("Plain line."))?.trimEnd()).toMatch(/│ • point note$/)
+    expect(rows.find(r => r.includes("Plain line."))?.trimEnd()).toMatch(/│ • point note +√ \+$/)
   })
 
   test("long notes wrap and collisions stack downward", () => {
@@ -182,8 +185,9 @@ describe("display", () => {
     const rows = displayRows(editor, VIEW)
     // Every margin cell spans the full margin so DOM hosts keep the bar aligned.
     for (const row of rows.filter(r => r.includes("│"))) expect(row.length).toBe(VIEW.cols)
-    const margin = rows.map(r => r.split("│")[1]?.trim() ?? "")
-    const expected = wrapWords(long, 31)
+    // The first line of each note also carries the √ / + buttons (4 cells).
+    const margin = rows.map(r => (r.split("│")[1] ?? "").replace(/√ \+\s*$/, "").trim())
+    const expected = wrapWords(long, 31, 27)
     expect(margin.slice(0, expected.length + 1)).toEqual([
       `• ${expected[0]}`,
       ...expected.slice(1),
@@ -204,7 +208,7 @@ describe("display", () => {
     await keySeq(editor, "C-c", "C-x", ";")
     const row = displayRows(editor, VIEW)[0]!
     expect(row).toContain("==fox==%%c%%")
-    expect(row.trimEnd()).toMatch(/│ • c$/)
+    expect(row.trimEnd()).toMatch(/│ • c +√ \+$/)
   })
 
   test("narrow windows drop the margin instead of crushing the text", () => {
@@ -237,8 +241,8 @@ describe("GUI text column (pixel wrap)", () => {
     expect(withMargin.textColumn).toBeDefined()
     expect(withMargin.textColumn!.leftPx + withMargin.textColumn!.widthPx)
       .toBeLessThan(without.textColumn!.leftPx + without.textColumn!.widthPx)
-    const notes = withMargin.body.chunks.filter(c => c.margin).map(c => c.text.trim())
-    expect(notes).toEqual(["│ • too quick"])
+    const notes = withMargin.body.chunks.filter(c => c.margin).map(c => [c.text.trim(), c.marginAction])
+    expect(notes).toEqual([["│ • too quick", "edit"], ["√", "resolve"], ["+", "reply"]])
     expect(without.body.chunks.some(c => c.margin)).toBe(false)
   })
 
@@ -249,6 +253,84 @@ describe("GUI text column (pixel wrap)", () => {
     editor.disableMinorMode(CRITIQUE_MODE, { buffer })
     pane(editor)
     expect(buffer.locals.get("window-body-cols")).toBe(VIEW.cols)
+  })
+})
+
+describe("clicking margin notes", () => {
+  const VIEW = { rows: 20, cols: 100 }
+  class StubHost implements UiHost {
+    readonly label = "stub"
+    readonly capabilities = { unit: "cells" as const, mouse: true, clipboard: false, osc52: false }
+    async start(): Promise<void> {}
+    destroy(): void {}
+    present(): void {}
+    getViewport() { return VIEW }
+    onInput(): void {}
+    onResize(): void {}
+  }
+  const bound = (text: string) => {
+    const s = setup(text)
+    const binding = bindJemacsHost(s.editor, new StubHost())
+    return { ...s, ...binding }
+  }
+  /** Click the first margin cell for `action`, through the char-grid mouse path. */
+  const click = async (b: ReturnType<typeof bound>, action: string) => {
+    const model = b.modelFor()
+    const pane = model.windows.kind === "leaf" ? model.windows.pane : null
+    const hit = pane!.marginHits!.find(h => h.action === action)!
+    await b.onInput({ type: "mouse", windowId: b.editor.selectedWindowId, row: hit.row, col: hit.start })
+    await Bun.sleep(0)
+  }
+
+  test("hits sit on the note's row: text = edit, √ = resolve, + = reply", () => {
+    const b = bound("The ==fox==%%too quick%% runs.\n")
+    const model = b.modelFor()
+    const pane = model.windows.kind === "leaf" ? model.windows.pane : null
+    const rows = themedTextPlain(pane!.body).split("\n")
+    for (const hit of pane!.marginHits!) {
+      const cell = rows[hit.row]!.slice(hit.start, hit.end)
+      if (hit.action === "edit") expect(cell).toContain("too quick")
+      else expect(cell.trim()).toBe(hit.action === "resolve" ? "√" : "+")
+    }
+  })
+
+  test("√ resolves the comment", async () => {
+    const b = bound("The ==fox==%%too quick%% runs.\n")
+    await click(b, "resolve")
+    expect(b.buffer.text).toBe("The fox runs.\n")
+  })
+
+  test("clicking the text edits it in the minibuffer", async () => {
+    const b = bound("The ==fox==%%too quick%% runs.\n")
+    const seen: Array<[string, string]> = []
+    b.editor.prompt = async (p, initial = "") => { seen.push([p, initial]); return "just right" }
+    await click(b, "edit")
+    expect(seen).toEqual([["Edit comment: ", "too quick"]])
+    expect(b.buffer.text).toBe("The ==fox==%%just right%% runs.\n")
+  })
+
+  test("+ adds another comment, which stacks under the first", async () => {
+    const b = bound("The ==fox==%%too quick%% runs.\n")
+    b.editor.prompt = async () => "agreed"
+    await click(b, "reply")
+    expect(b.buffer.text).toBe("The ==fox==%%too quick%%%%agreed%% runs.\n")
+    const margin = displayRows(b.editor, VIEW).map(r => (r.split("│")[1] ?? "").replace(/√ \+\s*$/, "").trim())
+    expect(margin.slice(0, 2)).toEqual(["• too quick", "• agreed"])
+  })
+
+  test("DOM hosts send the same click as a pane action", async () => {
+    const b = bound("The ==fox==%%too quick%% runs.\n")
+    const note = String(critiqueComments(b.buffer)[0]!.start)
+    await b.onInput({ type: "pane-action", windowId: b.editor.selectedWindowId, action: "right-margin-click", payload: { note, action: "resolve" } })
+    expect(b.buffer.text).toBe("The fox runs.\n")
+  })
+
+  test("C-c = replies from the keyboard", async () => {
+    const { editor, buffer } = setup("a ==b==%%one%% c")
+    buffer.point = 4
+    editor.prompt = async () => "two"
+    await keySeq(editor, "C-c", "=")
+    expect(buffer.text).toBe("a ==b==%%one%%%%two%% c")
   })
 })
 

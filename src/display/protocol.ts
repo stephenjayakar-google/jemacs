@@ -7,6 +7,7 @@ import type { ThemedText } from "./themed-text"
 import type { TerminalSurfaceModel } from "./terminal-surface"
 import type { ViewportSize } from "./viewport"
 import type { FontMetricsTable } from "./font-metrics"
+import type { RightMarginHit } from "./right-margin"
 
 export type DisplayChunk = ThemedText
 export type { CanvasShapeModel, CanvasSurfaceModel, TableSurfaceModel, WebNodeModel, WebSurfaceModel } from "../kernel/extension-points"
@@ -48,6 +49,8 @@ export type WindowPaneModel = {
   /** Per body row: how the host decorates it (see `rowDecoration`). Absent
    *  entries are plain rows. Only text columns carry these. */
   rowDecorations?: Array<RowDecorationModel | null>
+  /** Clickable right-margin cells (body row/col) for char-grid hosts. */
+  marginHits?: RightMarginHit[]
 }
 
 export type RowDecorationModel = {

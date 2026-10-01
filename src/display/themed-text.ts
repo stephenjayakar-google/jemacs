@@ -27,6 +27,9 @@ export type ThemedChunk = {
   margin?: boolean
   /** Spaces that align a margin note on char-grid hosts; DOM hosts skip it. */
   marginPad?: boolean
+  /** Clickable margin cell: the note id and action reported on click. */
+  marginNote?: string
+  marginAction?: string
 }
 
 /** Every style field of a chunk, in one place, so merge and cache code cannot miss one. */
@@ -38,6 +41,7 @@ export function sameChunkStyle(a: Omit<ThemedChunk, "text">, b: Omit<ThemedChunk
     && a.underlineStyle === b.underlineStyle && a.underlineColor === b.underlineColor
     && a.box?.color === b.box?.color && a.box?.width === b.box?.width
     && a.margin === b.margin && a.marginPad === b.marginPad
+    && a.marginNote === b.marginNote && a.marginAction === b.marginAction
 }
 
 export type ThemedText = {

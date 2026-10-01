@@ -5,7 +5,7 @@ import { modeLineage, type FaceName, type TextSpan } from "../../src/modes/mode"
 import { defcustom, defvar, getCustom } from "../../src/runtime/custom"
 import { defface } from "../../src/runtime/faces"
 import { createPluginContext, type PluginContext } from "../../src/runtime/plugin-context"
-import type { RightMarginFn, RightMarginSpec } from "../../src/display/right-margin"
+import type { RightMarginClickFn, RightMarginFn, RightMarginSpec } from "../../src/display/right-margin"
 import type { MarkdownHideFn, MarkupOp } from "../markdown"
 import {
   critiqueCommentAt,
@@ -99,6 +99,9 @@ export function critiqueMargin(editor: Editor, buffer: BufferModel, point: numbe
       pos: anchorOf(c),
       text: c.text,
       face: c === active ? "critique-margin-active-face" : "critique-margin-face",
+      // Clicking the text edits it; the √ / + buttons resolve and reply.
+      id: String(c.start),
+      actions: true,
     })),
   }
 }
@@ -123,6 +126,30 @@ export function critiqueEdit(buffer: BufferModel, c: CritiqueComment, comment: s
   const markup = formatCritiqueComment(c.quote || null, comment, c.syntax)
   buffer.replaceRange(c.start, c.end, markup)
   buffer.point = c.start + markup.length
+}
+
+/** Add another comment right after `c`, as a point comment in `c`'s dialect,
+ *  so it stacks under `c` in the margin. Leaves point after the new comment. */
+export function critiqueReply(buffer: BufferModel, c: CritiqueComment, comment: string): void {
+  const markup = formatCritiqueComment(null, comment, c.syntax)
+  buffer.replaceRange(c.end, c.end, markup)
+  buffer.point = c.end + markup.length
+}
+
+/** Map a margin click to the command that does the same thing from the
+ *  keyboard: point goes to the comment, then edit / resolve / reply runs. */
+export function critiqueMarginClick(editor: Editor, buffer: BufferModel, note: string, action: string): boolean {
+  if (!enabled(editor, buffer)) return false
+  const c = critiqueComments(buffer).find(x => String(x.start) === note)
+  if (!c) return false
+  buffer.clearMark()
+  buffer.point = anchorOf(c)
+  const command = action === "resolve" ? "critique-resolve-comment"
+    : action === "reply" ? "critique-reply-comment"
+    : "critique-comment"
+  // Not awaited: edit/reply open the minibuffer, which the next keys answer.
+  void editor.run(command)
+  return true
 }
 
 /** Drop the comment, keeping any highlighted text as plain text. */
@@ -166,6 +193,7 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
   keymap.bind("C-c ]", "critique-next-comment")
   keymap.bind("C-c [", "critique-previous-comment")
   keymap.bind("C-c /", "critique-resolve-comment")
+  keymap.bind("C-c =", "critique-reply-comment")
   keymap.bind("C-c C-x ;", "critique-toggle-inline-comments")
 
   ctx.minorMode({ name: CRITIQUE_MODE, lighter: " Crit", keymap })
@@ -177,6 +205,8 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
   const hides: MarkdownHideFn = buffer => critiqueHides(editor, buffer)
   pushCustom("right-margin-functions", margin, ctx)
   pushCustom("markdown-display-hide-functions", hides, ctx)
+  const click: RightMarginClickFn = (buffer, note, action) => critiqueMarginClick(editor, buffer, note, action)
+  pushCustom("right-margin-click-functions", click, ctx)
 
   ctx.hook("find-file-hook", ({ buffer }) => {
     if (getCustom<boolean>("critique-auto-enable") === false) return
@@ -210,6 +240,17 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
     else if (region) critiqueInsert(buffer, region.start, region.end, text)
     else critiqueInsert(buffer, buffer.point, buffer.point, text)
   }, "Comment on the region, edit the comment at point, or add a point comment.")
+
+  ctx.command("critique-reply-comment", async ({ editor, buffer }) => {
+    const c = critiqueCommentAt(critiqueComments(buffer), buffer.point)
+    if (!c) {
+      editor.message("No comment at point")
+      return
+    }
+    const text = await editor.prompt("Reply: ", "", "critique-comment")
+    if (text == null || !text.trim()) return
+    critiqueReply(buffer, c, text)
+  }, "Add another comment after the comment at point; it stacks under it in the margin.")
 
   ctx.command("critique-resolve-comment", ({ editor, buffer }) => {
     const c = critiqueCommentAt(critiqueComments(buffer), buffer.point)

@@ -7,6 +7,7 @@ import type { DisplayModel, InputHandler, UiHost } from "./display/protocol"
 import { scrollWindowByLines } from "./display/scroll"
 import { modeSystem } from "./kernel/extension-points"
 import { tabBarHitTest } from "./display/tab-bar"
+import { RIGHT_MARGIN_CLICK, rightMarginClick } from "./display/right-margin"
 
 export type JemacsHostBinding = {
   present: () => void
@@ -80,7 +81,14 @@ export function bindJemacsHost(editor: Editor, host: UiHost): JemacsHostBinding 
         const pane = findPaneInModel(lastModel.windows, input.windowId)
         const leaf = findWindowLeaf(editor.windowLayout, input.windowId)
         const buffer = leaf && editor.buffers.get(leaf.bufferId)
-        if (pane && buffer) {
+        // A click on a clickable right-margin note goes to its plugin, not to point.
+        const hit = !input.drag
+          ? pane?.marginHits?.find(h => h.row === input.row && input.col >= h.start && input.col < h.end)
+          : undefined
+        if (hit && buffer) {
+          editor.selectWindow(input.windowId)
+          if (rightMarginClick(buffer, hit.note, hit.action)) await editor.changed("right-margin-click")
+        } else if (pane && buffer) {
           const point = pointFromWindowClick(buffer.text, pane.clickState, input.row, input.col, pane.bodyLineBudget)
           editor.clickWindow(input.windowId, point, input.drag === true)
         }
@@ -102,7 +110,11 @@ export function bindJemacsHost(editor: Editor, host: UiHost): JemacsHostBinding 
       } else if (input.type === "pane-action") {
         const leaf = findWindowLeaf(editor.windowLayout, input.windowId)
         const buffer = leaf && editor.buffers.get(leaf.bufferId)
-        if (buffer) {
+        if (buffer && input.action === RIGHT_MARGIN_CLICK) {
+          editor.selectWindow(input.windowId)
+          const { note, action } = input.payload ?? {}
+          if (rightMarginClick(buffer, String(note), String(action))) await editor.changed("right-margin-click")
+        } else if (buffer) {
           editor.selectWindow(input.windowId)
           const handled = modeSystem.modeFeature(buffer.mode, "paneAction")?.(buffer, {
             action: input.action,

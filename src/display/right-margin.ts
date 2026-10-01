@@ -6,12 +6,23 @@ import type { Theme } from "./theme"
 import { styleToChunk, type ThemedChunk, type ThemedText } from "./themed-text"
 
 /** A note pinned to buffer offset `pos`, drawn in the window's right margin
- *  beside the row that shows `pos`. Notes that collide stack downward. */
-export type RightMarginNote = { pos: number; text: string; face?: string }
+ *  beside the row that shows `pos`. Notes that collide stack downward.
+ *
+ *  With an `id`, the note is clickable: clicking its text reports the `edit`
+ *  action, and `actions: true` adds `√` (`resolve`) and `+` (`reply`) buttons.
+ *  Clicks go to `right-margin-click-functions`. */
+export type RightMarginNote = { pos: number; text: string; face?: string; id?: string; actions?: boolean }
 export type RightMarginSpec = { width: number; notes: RightMarginNote[] }
 /** `point` is the window's point (not necessarily `buffer.point` for an
  *  unselected window). Return null to draw nothing. */
 export type RightMarginFn = (buffer: BufferModel, point: number) => RightMarginSpec | null
+export type RightMarginAction = "edit" | "resolve" | "reply"
+/** Return true when the click was handled. */
+export type RightMarginClickFn = (buffer: BufferModel, note: string, action: RightMarginAction) => boolean
+/** A clickable margin cell range on body row `row`, columns [start, end). For
+ *  char-grid hosts, whose clicks arrive as cells; DOM hosts read the chunk's
+ *  `marginNote`/`marginAction` instead. */
+export type RightMarginHit = { row: number; start: number; end: number; note: string; action: RightMarginAction }
 
 /** Which logical row (offset from the window's start line) a body row shows,
  *  and whether it is that row's first wrapped segment. */
@@ -20,11 +31,35 @@ export type RowOrigin = { row: number; first: boolean }
 /** Viewport-independent margin: notes resolved to display-text line indices. */
 export type LogicalRightMargin = {
   width: number
-  notes: Array<{ line: number; text: string; face?: string }>
+  notes: Array<{ line: number; text: string; face?: string; id?: string; actions?: boolean }>
 }
 
 defvar("right-margin-functions", [] as RightMarginFn[],
   "Functions returning right-margin notes for a buffer (see `RightMarginSpec`).")
+defvar("right-margin-click-functions", [] as RightMarginClickFn[],
+  "Functions called with (buffer, note-id, action) when a clickable margin note is clicked.")
+
+const ACTIONS: Array<{ action: RightMarginAction; label: string }> = [
+  { action: "resolve", label: " √" },
+  { action: "reply", label: " +" },
+]
+const ACTIONS_COLS = ACTIONS.reduce((n, a) => n + a.label.length, 0)
+
+/** `pane-action` name DOM hosts send for a margin click (payload: note, action). */
+export const RIGHT_MARGIN_CLICK = "right-margin-click"
+
+/** Offer a margin click to `right-margin-click-functions`; true if one took it. */
+export function rightMarginClick(buffer: BufferModel, note: string, action: string): boolean {
+  if (action !== "edit" && action !== "resolve" && action !== "reply") return false
+  for (const fn of getCustom<RightMarginClickFn[]>("right-margin-click-functions") ?? []) {
+    try {
+      if (fn(buffer, note, action)) return true
+    } catch (err) {
+      console.error("right-margin click function threw:", err)
+    }
+  }
+  return false
+}
 
 /** Narrowest text column we keep before dropping the margin entirely. */
 const MIN_TEXT_COLS = 40
@@ -64,7 +99,7 @@ export function logicalRightMargin(
   for (const { note, dpos } of placed) {
     const limit = Math.min(dpos, displayText.length)
     for (; scan < limit; scan++) if (displayText.charCodeAt(scan) === 10) line++
-    notes.push({ line, text: note.text, face: note.face })
+    notes.push({ line, text: note.text, face: note.face, id: note.id, actions: note.actions })
   }
   return { width: Math.floor(width), notes }
 }
@@ -82,7 +117,7 @@ export function fitRightMargin(margin: LogicalRightMargin | undefined, cols: num
  *  (offset from `startLine`) body row `k` belongs to; notes start on the first
  *  wrapped row of their line and push later notes down when they overlap.
  *  Margin chunks are tagged so DOM hosts can position them independently of
- *  variable-pitch text. */
+ *  variable-pitch text; `hits` locates the clickable cells for char-grid hosts. */
 export function appendRightMargin(
   body: ThemedText,
   origins: readonly RowOrigin[],
@@ -91,7 +126,7 @@ export function appendRightMargin(
   textCols: number,
   theme: Theme,
   buffer?: BufferModel,
-): ThemedText {
+): { text: ThemedText; hits: RightMarginHit[] } {
   const byLine = new Map<number, LogicalRightMargin["notes"]>()
   for (const note of margin.notes) {
     const list = byLine.get(note.line)
@@ -99,9 +134,11 @@ export function appendRightMargin(
     else byLine.set(note.line, [note])
   }
   const textWidth = margin.width - NOTE_PREFIX_COLS
-  const queue: Array<{ bullet: boolean; text: string; style: Omit<ThemedChunk, "text"> }> = []
+  type QueuedLine = { bullet: boolean; text: string; style: Omit<ThemedChunk, "text">; id?: string; actions: boolean }
+  const queue: QueuedLine[] = []
   const rows = splitRows(body)
   const out: ThemedChunk[] = []
+  const hits: RightMarginHit[] = []
   for (let k = 0; k < rows.length; k++) {
     if (k > 0) out.push({ text: "\n" })
     const row = rows[k]!
@@ -110,18 +147,29 @@ export function appendRightMargin(
     if (origin?.first) {
       for (const note of byLine.get(startLine + origin.row) ?? []) {
         const style = styleToChunk(resolveFace((note.face ?? "comment") as FaceName, theme, buffer))
-        wrapWords(note.text || "(empty)", textWidth).forEach((text, i) => queue.push({ bullet: i === 0, text, style }))
+        const actions = Boolean(note.id && note.actions && textWidth - ACTIONS_COLS > 4)
+        wrapWords(note.text || "(empty)", textWidth, actions ? textWidth - ACTIONS_COLS : textWidth)
+          .forEach((text, i) => queue.push({ bullet: i === 0, text, style, id: note.id, actions: actions && i === 0 }))
       }
     }
     const next = queue.shift()
     if (!next) continue
     const used = row.reduce((n, c) => n + cellWidth(c.text), 0)
     if (used < textCols) out.push({ text: " ".repeat(textCols - used), marginPad: true })
-    // Pad to the full margin width so DOM hosts (which right-align the
-    // chunk) keep every row's bar in the same column.
-    out.push({ ...next.style, text: ` │ ${next.bullet ? "•" : " "} ${next.text}`.padEnd(margin.width), margin: true })
+    let col = Math.max(used, textCols)
+    const push = (text: string, action: RightMarginAction) => {
+      const target = next.id ? { marginNote: next.id, marginAction: action } : {}
+      out.push({ ...next.style, text, margin: true, ...target })
+      if (next.id) hits.push({ row: k, start: col, end: col + text.length, note: next.id, action })
+      col += text.length
+    }
+    // Pad to the full margin width so DOM hosts (which pin the note) keep
+    // every row's bar in the same column.
+    const bodyCols = margin.width - (next.actions ? ACTIONS_COLS : 0)
+    push(` │ ${next.bullet ? "•" : " "} ${next.text}`.padEnd(bodyCols), "edit")
+    if (next.actions) for (const { action, label } of ACTIONS) push(label, action)
   }
-  return { chunks: out }
+  return { text: { chunks: out }, hits }
 }
 
 function splitRows(body: ThemedText): ThemedChunk[][] {
@@ -142,21 +190,26 @@ function cellWidth(text: string): number {
   return n
 }
 
-/** Greedy word wrap; words longer than `width` are hard-split. */
-export function wrapWords(text: string, width: number): string[] {
+/** Greedy word wrap; words longer than the line are hard-split. The first
+ *  line may be narrower (`firstWidth`) to leave room for action buttons. */
+export function wrapWords(text: string, width: number, firstWidth = width): string[] {
   const lines: string[] = []
   let line = ""
+  const cap = () => (lines.length ? width : firstWidth)
   for (const word of text.split(/\s+/).filter(Boolean)) {
     let w = word
-    while (w.length > width) {
-      if (line) { lines.push(line); line = "" }
-      lines.push(w.slice(0, width))
-      w = w.slice(width)
+    for (;;) {
+      const c = cap()
+      if (!line) {
+        if (w.length <= c) { line = w; break }
+        lines.push(w.slice(0, c))
+        w = w.slice(c)
+        continue
+      }
+      if (line.length + 1 + w.length <= c) { line += ` ${w}`; break }
+      lines.push(line)
+      line = ""
     }
-    if (!w) continue
-    if (!line) line = w
-    else if (line.length + 1 + w.length <= width) line += ` ${w}`
-    else { lines.push(line); line = w }
   }
   if (line) lines.push(line)
   return lines.length ? lines : [""]

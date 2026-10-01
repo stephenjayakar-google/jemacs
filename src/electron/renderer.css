@@ -63,6 +63,8 @@ html, body { margin: 0; height: 100%; font-size: 14px; font-family: var(--jemacs
  * note just past it, in the space the margin reserved. */
 .body-row > .margin-note { position: absolute; top: 0; right: 0; white-space: pre; font-family: monospace; }
 .text-column .body-row > .margin-note { right: auto; left: calc(100% + 2em); }
+.margin-note > .margin-action { cursor: pointer; border-radius: 3px; }
+.margin-note > .margin-action:hover { background: color-mix(in srgb, currentColor 15%, transparent); }
 /* Row decorations. The kernel owns every px of padding (it wrapped and costed
  * the rows with them); CSS adds only colour, rules and radii, never width. */
 .text-column .body-row.row-code,

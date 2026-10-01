@@ -15,7 +15,7 @@ import { contentAreaLines, windowBodyLines, type ViewportSize } from "./viewport
 import { paneWrapLayoutFor, wrapBodyRowsWithMap } from "./display-wrap"
 import { imageBox, pixelRowCounts, pixelWrapFor, rowDecoration, type DisplayImage, type PixelWrapLayout } from "./pixel-wrap"
 import type { RowDecorationModel } from "./protocol"
-import { appendRightMargin, fitRightMargin } from "./right-margin"
+import { appendRightMargin, fitRightMargin, type RightMarginHit } from "./right-margin"
 import {
   computeLineVisualRows,
   computeWrappedLineRows,
@@ -343,9 +343,12 @@ function layoutLeafPane(
     }
   }
   // After caret extraction, so the zero-width marker never counts as a cell.
+  let marginHits: RightMarginHit[] | undefined
   if (margin && textCols != null) {
     const origins = wrapped.rows.map(r => ({ row: r.line, first: r.start === 0 }))
-    body = appendRightMargin(body, origins, startLine, margin, textCols, logical.theme, pane.buffer)
+    const appended = appendRightMargin(body, origins, startLine, margin, textCols, logical.theme, pane.buffer)
+    body = appended.text
+    if (appended.hits.length) marginHits = appended.hits
   }
 
   return {
@@ -370,6 +373,7 @@ function layoutLeafPane(
     textScale: pane.textScale,
     ...(pixel ? { textColumn: { leftPx: pixel.leftPx, widthPx: pixel.columnPx, lineHeight: pixel.lineHeight } } : {}),
     ...(rowDecorations?.some(Boolean) ? { rowDecorations } : {}),
+    ...(marginHits ? { marginHits } : {}),
   }
 }
 

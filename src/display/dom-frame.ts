@@ -98,7 +98,7 @@ function rowSignature(
   const family = options.defaultFamily ?? ""
   let out = `${scale}|${defaultPx}|${family}|${options.defaultBg ?? ""}`
   for (const { chunk, text } of parts) {
-    out += `\u0000${chunk.margin ? "m" : ""}${text}\u0001${chunk.fg ?? ""}\u0001${chunk.bg ?? ""}`
+    out += `\u0000${chunk.margin ? `m${chunk.marginNote ?? ""}:${chunk.marginAction ?? ""}` : ""}${text}\u0001${chunk.fg ?? ""}\u0001${chunk.bg ?? ""}`
       + `\u0001${chunk.bold ? 1 : 0}${chunk.italic ? 1 : 0}${chunk.underline ? 1 : 0}`
       + `\u0001${chunk.family ?? ""}\u0001${chunk.height ?? ""}\u0001${chunk.heightScale ?? ""}`
       + `\u0001${chunk.weight ?? ""}\u0001${chunk.strikeThrough ?? ""}\u0001${chunk.overline ?? ""}`
@@ -172,11 +172,28 @@ export function renderBodyRows(
     // Same element, new content: swap the spans rather than the row itself, so the
     // browser repaints one line instead of the whole body.
     row.replaceChildren()
+    // A row's margin chunks share one pinned `.margin-note` box; clickable ones
+    // carry the note id/action that `renderWindows` reports on mousedown.
+    let note: HTMLElement | null = null
     for (const { chunk, text } of parts) {
-      renderChunk(row, { ...chunk, text }, options)
-      if (chunk.margin) (row.lastElementChild as HTMLElement).className = "margin-note"
+      if (!chunk.margin) {
+        renderChunk(row, { ...chunk, text }, options)
+        continue
+      }
+      if (!note) {
+        note = document.createElement("span")
+        note.className = "margin-note"
+        row.appendChild(note)
+      }
+      renderChunk(note, { ...chunk, text }, options)
+      if (chunk.marginNote && chunk.marginAction) {
+        const cell = note.lastElementChild as HTMLElement
+        cell.className = "margin-action"
+        cell.dataset.marginNote = chunk.marginNote
+        cell.dataset.marginAction = chunk.marginAction
+      }
     }
-    row.style.position = parts.some(p => p.chunk.margin) ? "relative" : ""
+    row.style.position = note ? "relative" : ""
     if (decoration?.image) appendInlineImage(row, decoration.image)
     rowSignatures.set(row, signature)
     rows.push(row)
@@ -626,7 +643,19 @@ export function renderWindows(
     const dom: PaneDom = { paneEl: pane, bodyEl: body, footerEl: footer, modelineEl: modeline }
     fillPane(dom, node.pane, grow, theme, terminalRenderer, onPaneAction)
     body.addEventListener("mousedown", event => {
-      if (event.button !== 0 || !onMouse) return
+      if (event.button !== 0) return
+      // Clickable right-margin note (right-margin.ts `RIGHT_MARGIN_CLICK`): its
+      // plugin handles it instead of the click moving point.
+      const target = (event.target as HTMLElement | null)?.closest?.("[data-margin-action]") as HTMLElement | null | undefined
+      if (target && onPaneAction) {
+        event.preventDefault?.()
+        onPaneAction(pane.dataset.windowId ?? node.pane.id, "right-margin-click", {
+          note: target.dataset.marginNote ?? "",
+          action: target.dataset.marginAction ?? "",
+        })
+        return
+      }
+      if (!onMouse) return
       beginMouseDrag(event, pane, body, onMouse)
     })
     pane.addEventListener("mousedown", event => {
