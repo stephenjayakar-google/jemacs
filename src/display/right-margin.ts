@@ -117,7 +117,9 @@ export function appendRightMargin(
     if (!next) continue
     const used = row.reduce((n, c) => n + cellWidth(c.text), 0)
     if (used < textCols) out.push({ text: " ".repeat(textCols - used), marginPad: true })
-    out.push({ ...next.style, text: ` │ ${next.bullet ? "•" : " "} ${next.text}`, margin: true })
+    // Pad to the full margin width so DOM hosts (which right-align the
+    // chunk) keep every row's bar in the same column.
+    out.push({ ...next.style, text: ` │ ${next.bullet ? "•" : " "} ${next.text}`.padEnd(margin.width), margin: true })
   }
   return { chunks: out }
 }

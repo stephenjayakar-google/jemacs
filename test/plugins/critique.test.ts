@@ -168,15 +168,18 @@ describe("display", () => {
     expect(foxRow).toBeDefined()
     expect(foxRow).not.toContain("%%")
     expect(foxRow).not.toContain("==")
-    expect(foxRow).toMatch(/│ • too quick$/)
+    expect(foxRow.trimEnd()).toMatch(/│ • too quick$/)
     expect(foxRow.indexOf("│")).toBe(VIEW.cols - 36 + 1)
-    expect(rows.find(r => r.includes("Plain line."))).toMatch(/│ • point note$/)
+    expect(rows.find(r => r.includes("Plain line."))?.trimEnd()).toMatch(/│ • point note$/)
   })
 
   test("long notes wrap and collisions stack downward", () => {
     const long = "this note is long enough that it has to wrap across several margin rows"
     const { editor } = setup(`a ==x==%%${long}%% ==y==%%second%%\nb\nc\nd\ne\n`)
-    const margin = displayRows(editor, VIEW).map(r => r.split("│")[1]?.trim() ?? "")
+    const rows = displayRows(editor, VIEW)
+    // Every margin cell spans the full margin so DOM hosts keep the bar aligned.
+    for (const row of rows.filter(r => r.includes("│"))) expect(row.length).toBe(VIEW.cols)
+    const margin = rows.map(r => r.split("│")[1]?.trim() ?? "")
     const expected = wrapWords(long, 31)
     expect(margin.slice(0, expected.length + 1)).toEqual([
       `• ${expected[0]}`,
@@ -198,7 +201,7 @@ describe("display", () => {
     await keySeq(editor, "C-c", "C-x", ";")
     const row = displayRows(editor, VIEW)[0]!
     expect(row).toContain("==fox==%%c%%")
-    expect(row).toMatch(/│ • c$/)
+    expect(row.trimEnd()).toMatch(/│ • c$/)
   })
 
   test("narrow windows drop the margin instead of crushing the text", () => {
