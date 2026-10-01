@@ -6,6 +6,7 @@ import type { Theme } from "./theme"
 import type { ThemedText } from "./themed-text"
 import type { TerminalSurfaceModel } from "./terminal-surface"
 import type { ViewportSize } from "./viewport"
+import type { FontMetricsTable } from "./font-metrics"
 
 export type DisplayChunk = ThemedText
 export type { CanvasShapeModel, CanvasSurfaceModel, TableSurfaceModel, WebNodeModel, WebSurfaceModel } from "../kernel/extension-points"
@@ -41,6 +42,27 @@ export type WindowPaneModel = {
   syncSpans: TextSpan[]
   /** Per-buffer text scale factor (1 = default; from `text-scale-mode-amount`). */
   textScale: number
+  /** Set when rows were wrapped in pixels: the host must draw each body row on
+   *  one line (no wrapping), starting `leftPx` from the body's content edge. */
+  textColumn?: { leftPx: number; widthPx: number; lineHeight: number }
+  /** Per body row: how the host decorates it (see `rowDecoration`). Absent
+   *  entries are plain rows. Only text columns carry these. */
+  rowDecorations?: Array<RowDecorationModel | null>
+}
+
+export type RowDecorationModel = {
+  kind: string
+  /** First / last screen row of its buffer line. */
+  first: boolean
+  last: boolean
+  insetPx?: number
+  insetRightPx?: number
+  padTopPx?: number
+  /** List nesting guides: `count` 1px lines in the inset, the first at
+   *  `startPx` from the row's left edge, then every `stepPx`. */
+  guides?: { startPx: number; stepPx: number; count: number }
+  /** Picture drawn under the text of the line's last row, at this px size. */
+  image?: { src: string; widthPx: number; heightPx: number }
 }
 
 export type ChildFrameModel = {
@@ -99,6 +121,9 @@ export type HostCapabilities = {
   richTables?: boolean
   /** When true, the host can render declarative HTML/canvas panes (DOM hosts only). */
   webSurfaces?: boolean
+  /** Glyph widths the host's renderer measured. With `perFaceFonts`, text-column
+   *  buffers wrap in pixels against these, so the host never wraps a row again. */
+  fontMetrics?: FontMetricsTable
 }
 
 export type TerminalData = {
@@ -144,4 +169,6 @@ export interface UiHost {
   getViewport(): ViewportSize
   onInput(handler: InputHandler): void
   onResize(handler: ResizeHandler): void
+  /** Hosts that measure fonts call this after new widths arrive. */
+  onFontMetrics?(handler: () => void): void
 }

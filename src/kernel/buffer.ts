@@ -783,6 +783,7 @@ export function inferMode(path: string, text = ""): string {
   if (/\.scss$/.test(path)) return "scss-mode"
   if (/\.sass$/.test(path)) return "sass-mode"
   if (/\.toml$/.test(path)) return "toml-mode"
+  if (/\.sql$/i.test(path)) return "sql-mode"
   if (/(^|\/)(?:GNU|BSD)?[Mm]akefile$/.test(path) || /\.(mk|mak)$/.test(path)) return "makefile-mode"
   if (/(^|\/)Dockerfile(?:\.[\w.-]+)?$/.test(path) || /\.dockerfile$/.test(path)) return "dockerfile-mode"
   if (/\.(cc|cpp|cxx|hh|hpp|hxx|c\+\+|ipp)$/.test(path)) return "c++-mode"
@@ -790,8 +791,11 @@ export function inferMode(path: string, text = ""): string {
   if (/\.(scm|ss|sld)$/.test(path)) return "scheme-mode"
   if (/\.(xml|svg|xhtml|plist|rss|xsl|xsd|wsdl)$/i.test(path)) return "xml-mode"
   if (/\.rst$/.test(path)) return "rst-mode"
-  if (/\.(tex|ltx)$/.test(path)) return "latex-mode"
-  if (/\.(sty|cls)$/.test(path)) return "tex-mode"
+  // GNU `auto-mode-alist` sends `.tex` to `tex-mode`, which is a dispatcher:
+  // `tex--guess-mode` reads the head of the file and redirects to `latex-mode`
+  // or `plain-tex-mode`. `.ltx`/`.sty`/`.cls`/`.bbl` go straight to latex-mode.
+  if (/\.tex$/.test(path)) return texOrLatex(text)
+  if (/\.(ltx|sty|cls|bbl)$/.test(path)) return "latex-mode"
   if (/\.bib$/.test(path)) return "bibtex-mode"
   if (/(^|\/)CMakeLists\.txt$/.test(path) || /\.cmake$/.test(path)) return "cmake-mode"
   if (/(^|\/)go\.(mod|work)$/.test(path)) return "go-mod-mode"
@@ -839,6 +843,24 @@ function guessConfMode(text: string): string {
   if (space > Math.max(equal, colon)) return "conf-space-mode"
   if (win > unix) return "conf-windows-mode"
   return "conf-unix-mode"
+}
+
+/**
+ * `tex--guess-mode`. Find the first backslash that is not behind a `%`
+ * comment; if a LaTeX-only command follows it the file is LaTeX, otherwise it
+ * is plain TeX. With no such backslash at all, fall back to `tex-default-mode`,
+ * whose GNU default is `latex-mode`.
+ */
+function texOrLatex(text: string): "latex-mode" | "plain-tex-mode" {
+  const latexCommand = /^\\(?:documentstyle|documentclass|begin|subsection|section|part|chapter|newcommand|renewcommand|RequirePackage)\b|^\\NeedsTeXFormat\{LaTeX/
+  for (const line of text.split("\n")) {
+    const comment = line.indexOf("%")
+    const body = comment === -1 ? line : line.slice(0, comment)
+    const slash = body.indexOf("\\")
+    if (slash === -1) continue
+    return latexCommand.test(body.slice(slash)) ? "latex-mode" : "plain-tex-mode"
+  }
+  return "latex-mode"
 }
 
 function cOrCpp(text: string): "c" | "c++-mode" {

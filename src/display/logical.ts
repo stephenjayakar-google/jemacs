@@ -51,6 +51,10 @@ export type LogicalPane = {
   displayMap?: (n: number) => number
   /** Inverse of `displayMap`, used by host mouse hit-testing. */
   displayUnmap?: (n: number) => number
+  /** Row kind per display line, from the mode's display filter (text columns only). */
+  displayLineKinds?: ReadonlyArray<string | undefined>
+  /** Inline image under each display line, from the display filter. */
+  displayLineImages?: ReadonlyArray<{ src: string; width: number; height: number } | undefined>
   /** Font-lock + LSP + overlay-source + isearch spans, buffer-absolute. Region
    *  is *not* included here — derive it from `point`/`mark`. */
   spans: TextSpan[]
@@ -255,6 +259,8 @@ function buildLogicalPane(editor: Editor, leaf: WindowLeaf, selectedWindowId: st
     displayOffsets,
     displayMap: paneDisplayMap({ displayOffsets }),
     displayUnmap: filt?.unmap,
+    ...(filt?.lineKinds ? { displayLineKinds: filt.lineKinds } : {}),
+    ...(filt?.lineImages ? { displayLineImages: filt.lineImages } : {}),
     spans,
     fontLockSpans,
     point,

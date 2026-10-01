@@ -6,7 +6,7 @@ import type { TextSpan } from "../src/modes/mode"
 import { defcustom, defvar, getCustom } from "../src/runtime/custom"
 import { currentKill, getKillRing, killNew, killRingIndex as ringIndex, setInterprogramCutFunction } from "../src/runtime/kill-ring"
 import { isPrintable, Keymap } from "../src/kernel/keymap"
-import { scrollDownCommand, scrollUpCommand, selectedWindowBodyBudget } from "../src/display/scroll"
+import { pixelVisualLineMove, scrollDownCommand, scrollUpCommand, selectedWindowBodyBudget } from "../src/display/scroll"
 import { visualLineMove } from "../src/display/display-wrap"
 import { defineMode, modeFeature } from "../src/modes/mode"
 import { spawnProcess } from "../src/platform/runtime"
@@ -47,7 +47,9 @@ export function install(editor: Editor, ctx?: PluginContext): void {
   const moveLine = (buffer: BufferModel, editor: Editor, delta: number) => {
     const target = buffer.lineAt(buffer.point) + delta
     // Emacs `line-move-visual`: with soft wrapping on, C-n/C-p step screen
-    // rows, so a wrapped paragraph takes several presses to cross.
+    // rows, so a wrapped paragraph takes several presses to cross. A GUI text
+    // column wraps in pixels, so it walks the pixel rows the frame shows.
+    if (pixelVisualLineMove(editor, buffer, delta)) return
     if (visualLineMove(buffer, delta)) return
     buffer.moveLine(delta)
     if (target < buffer.lineAt(buffer.pointMin)) editor.message("Beginning of buffer")

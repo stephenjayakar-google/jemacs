@@ -141,6 +141,9 @@ export async function runJemacsCore(editor: Editor, host: UiHost): Promise<Jemac
 
   host.onInput(binding.onInput)
   host.onResize(redisplay)
+  // New glyph widths change where pixel-wrapped rows break. Redisplay runs
+  // through `changed` so it coalesces with any pending one.
+  host.onFontMetrics?.(() => { void editor.changed("font-metrics") })
   editor.events.on("terminalData", payload => {
     host.sendTerminalData?.(payload)
   })

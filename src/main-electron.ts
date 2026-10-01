@@ -3,6 +3,8 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { app } from "electron"
 import { buildDisplayModel } from "./display/build-display-model"
+import { DOM_FRAME_LINE_HEIGHT_RATIO } from "./display/dom-frame"
+import { setCustom } from "./runtime/custom"
 import { findPaneInModel } from "./display/find-pane"
 import { Editor } from "./kernel/editor"
 import { listWindowLeaves } from "./kernel/window"
@@ -57,12 +59,31 @@ async function runGuiSmokeTest(editor: Editor, host: ElectronHost): Promise<void
     throw new Error("buffer insert did not apply")
   }
 
-  await assertRendererPaints(editor, host)
+  try {
+    await assertRendererPaints(editor, host)
+  } finally {
+    // Capture even when an assertion failed: the failing frame is the one worth
+    // looking at.
+    await captureScreenshot(host)
+  }
 
   await rm(dir, { recursive: true })
   console.log("GUI smoke OK: open-file, split, other-window, insert, display model")
   host.destroy()
   app.quit()
+}
+
+/**
+ * Write a PNG of the current renderer when JEMACS_GUI_SCREENSHOT names a path.
+ *
+ * The pixels come from Chromium's compositor, so this also works with a hidden
+ * window and over ssh.
+ */
+async function captureScreenshot(host: ElectronHost): Promise<void> {
+  const shot = process.env.JEMACS_GUI_SCREENSHOT
+  if (!shot) return
+  const written = await host.capturePage(shot)
+  console.log(written ? `GUI smoke screenshot: ${written}` : "GUI smoke screenshot: no window")
 }
 
 /** Let the redisplay microtask run and the IPC frame reach the renderer. */
@@ -123,10 +144,13 @@ async function assertRendererPaints(editor: Editor, host: ElectronHost): Promise
   //
   // `renderBodyRows` now reconciles rows in place rather than replacing the subtree, so
   // it is responsible for sweeping children the old `replaceChildren` used to clear for
-  // free. This walks the cursor and checks the body stays well-formed: rows present, and
-  // exactly one block cursor. (The GUI draws the cursor as a U+2588 glyph inside the
-  // text, not as a separate caret element -- `pane.cursor` and `renderCaret` are only
-  // reachable from hosts that set that field, which this build does not.)
+  // free. This walks the cursor and checks the body stays well-formed: rows present,
+  // exactly one caret element, and no other stray child.
+  //
+  // This host sets `perFaceFonts: true`, so `char-grid-layout` gives the pane a
+  // `cursor` field and `renderCaret` draws one absolutely-positioned
+  // `div.jemacs-caret` per body. That element is expected, not a leak. A second
+  // one is a leak: it means a prior caret survived the repaint.
   await check("text body stable across cursor movement", async () => {
     await editor.run("switch-to-buffer", ["smoke"])
     await editor.changed("gui-smoke-text-body")
@@ -137,14 +161,91 @@ async function assertRendererPaints(editor: Editor, host: ElectronHost): Promise
       await editor.changed(`gui-smoke-caret-${i}`)
       await settleFrame()
       if (await count(".window-body .body-row") === 0) return `body rows vanished on repaint ${i}`
-      const strays = await count(".window-body > :not(.body-row)")
-      if (strays !== 0) return `${strays} stray non-row children after repaint ${i}`
-      const blocks = await host.queryRenderer<number>(
-        `(document.querySelector(".window-pane.selected .window-body")?.textContent ?? "")`
-        + `.split("\\u2588").length - 1`,
-      ) ?? 0
-      if (blocks !== 1) return `expected exactly 1 block cursor after repaint ${i}, found ${blocks}`
+      const strays = await count(".window-body > :not(.body-row):not(.jemacs-caret)")
+      if (strays !== 0) {
+        // Name the stray tags: "1 stray child" alone does not say what leaked.
+        const tags = await host.queryRenderer<string>(
+          `[...document.querySelectorAll(".window-body > :not(.body-row):not(.jemacs-caret)")]`
+          + `.map(el => el.tagName.toLowerCase() + "." + el.className).join(", ")`,
+        ) ?? ""
+        return `${strays} stray non-row children after repaint ${i}: ${tags}`
+      }
+      const carets = await count(".window-pane.selected .window-body > .jemacs-caret")
+      if (carets !== 1) return `expected exactly 1 caret after repaint ${i}, found ${carets}`
     }
+    return null
+  })
+
+  // Box-cursor geometry, measured in Chromium rather than asserted against a
+  // mocked DOM. Emacs sizes a box cursor to the glyph it covers and to the line
+  // cell -- `font-get-glyphs` on a 40px markdown heading reports a 30px advance
+  // -- so a caret that is a fixed fraction of the font, or that uses the thin
+  // bar's height ratio, is wrong in a way only a real layout shows.
+  await check("box caret matches the glyph it covers", async () => {
+    const buffer = editor.scratch("caret-geometry.md", "# Heading\n", "markdown")
+    buffer.point = 2
+    setCustom("cursor-type", "box")
+    await editor.changed("gui-smoke-caret-geometry")
+    await settleFrame()
+    const geo = await host.queryRenderer<{
+      w: number; h: number; glyph: number; font: number
+      caretTop: number; caretBottom: number
+      glyphTop: number; glyphBottom: number; rowHeight: number
+    } | null>(`(() => {
+      const caret = document.querySelector(".window-pane.selected .jemacs-caret")
+      const row = document.querySelector(".window-pane.selected .body-row")
+      if (!caret || !row) return null
+      // Measure the same character the caret sits on: pick the glyph whose left
+      // edge is nearest the caret. Measuring the row's first span instead lands
+      // on the heading markup, which is a different size than the title text.
+      const caretLeft = caret.getBoundingClientRect().left
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT)
+      let node = null, best = Infinity, offset = 0, span = null
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        for (let i = 0; i < n.data.length; i++) {
+          const r = document.createRange()
+          r.setStart(n, i); r.setEnd(n, i + 1)
+          const d = Math.abs(r.getBoundingClientRect().left - caretLeft)
+          if (d < best) { best = d; node = n; offset = i; span = n.parentElement }
+        }
+      }
+      if (!node) return null
+      const range = document.createRange()
+      range.setStart(node, offset); range.setEnd(node, offset + 1)
+      const c = caret.getBoundingClientRect()
+      const g = range.getBoundingClientRect()
+      const rowBox = row.getBoundingClientRect()
+      return {
+        w: Math.round(c.width), h: Math.round(c.height),
+        glyph: Math.round(g.width),
+        font: Math.round(Number.parseFloat(getComputedStyle(span).fontSize)),
+        caretTop: Math.round(c.top - rowBox.top),
+        caretBottom: Math.round(c.bottom - rowBox.top),
+        glyphTop: Math.round(g.top - rowBox.top),
+        glyphBottom: Math.round(g.bottom - rowBox.top),
+        rowHeight: Math.round(rowBox.height),
+      }
+    })()`)
+    if (!geo) return "no caret or body span"
+    if (geo.glyph <= 0) return "glyph did not measure"
+    // Width is the glyph's own advance, not a fraction of the font size.
+    if (geo.w !== geo.glyph) return `caret width ${geo.w}px != glyph ${geo.glyph}px`
+    // Height is the line cell, never the bar ratio.
+    const cell = Math.round(geo.font * DOM_FRAME_LINE_HEIGHT_RATIO)
+    if (Math.abs(geo.h - cell) > 1) return `caret height ${geo.h}px != line cell ${cell}px (font ${geo.font}px)`
+    // Position, not just size. Emacs anchors a box to the top of its line
+    // (`pos-visible-in-window-p` reports y=0 on this heading), and the glyph
+    // must sit inside the box. Sizing alone passed while the caret hung 28px
+    // below the row, painting over the next line -- the reported bug.
+    if (Math.abs(geo.caretTop) > 1) return `caret top ${geo.caretTop}px, expected the line top (0)`
+    if (geo.caretBottom > geo.rowHeight + 1) {
+      return `caret runs to ${geo.caretBottom}px past a ${geo.rowHeight}px row`
+    }
+    if (geo.glyphTop < geo.caretTop - 1 || geo.glyphBottom > geo.caretBottom + 1) {
+      return `glyph ${geo.glyphTop}..${geo.glyphBottom} escapes caret ${geo.caretTop}..${geo.caretBottom}`
+    }
+    console.log(`GUI smoke caret: ${geo.w}x${geo.h}px at y=${geo.caretTop} over a ${geo.glyph}px glyph`
+      + ` (${geo.glyphTop}..${geo.glyphBottom}) in a ${geo.rowHeight}px row at ${geo.font}px`)
     return null
   })
 
@@ -275,6 +376,16 @@ async function main(): Promise<void> {
     } catch (error) {
       editor.message(error instanceof Error ? error.message : String(error))
     }
+  }
+
+  // Headless visual check of a real file with the full config: render, capture, quit.
+  // `JEMACS_GUI_HEADLESS=1 JEMACS_GUI_SCREENSHOT=/tmp/x.png ./run.sh --gui notes.md`
+  if (!argv.includes("--smoke-gui") && process.env.JEMACS_GUI_SCREENSHOT && process.env.JEMACS_GUI_HEADLESS === "1") {
+    await new Promise(resolve => setTimeout(resolve, 2500))
+    await captureScreenshot(host)
+    host.destroy()
+    app.quit()
+    return
   }
 
   if (argv.includes("--smoke-gui")) {

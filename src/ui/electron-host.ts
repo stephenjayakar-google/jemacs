@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, globalShortcut, ipcMain } from "electron"
+import { writeFile } from "node:fs/promises"
 import path from "node:path"
 import { serializeDisplayModel, type SerializedDisplayModel } from "../display/serialize"
 import type {
@@ -13,6 +14,7 @@ import { contentAreaLines, defaultTerminalRows, type ViewportSize } from "../dis
 import type { KeyEventLike } from "../kernel/keymap"
 import { DOM_FRAME_BODY_FONT_PX, DOM_FRAME_LINE_HEIGHT_RATIO } from "../display/dom-frame"
 import { appName } from "../runtime/app-name"
+import { FontMetricsTable } from "../display/font-metrics"
 
 // Must match what the renderer actually draws, or the kernel lays out a different
 // number of rows than the DOM has room for. A surplus leaves the body permanently
@@ -23,6 +25,17 @@ const COL_PX = 9
 
 /** OS-wide hotkey that raises a jemacs GUI window from any app. */
 const DEFAULT_GLOBAL_ACTIVATE_ACCELERATOR = "Command+Alt+Y"
+
+/**
+ * Headless GUI mode: Chromium still renders the real DOM, but no OS window is
+ * mapped, the macOS dock icon stays hidden, and nothing steals focus. A test run
+ * therefore cannot switch Spaces or take over the developer's screen. Set
+ * JEMACS_GUI_HEADLESS=1 to enable it. Screenshots come from
+ * `ElectronHost.capturePage()`, not from `screencapture`.
+ */
+export function guiHeadless(): boolean {
+  return process.env.JEMACS_GUI_HEADLESS === "1"
+}
 
 export class ElectronHost implements UiHost {
   readonly label = "Jemacs GUI"
@@ -36,7 +49,9 @@ export class ElectronHost implements UiHost {
     terminalRawStreams: true,
     richTables: true,
     webSurfaces: true,
+    fontMetrics: new FontMetricsTable(),
   }
+  private fontMetricsHandlers: Array<() => void> = []
 
   private window: BrowserWindow | null = null
   private inputHandlers: InputHandler[] = []
@@ -57,16 +72,25 @@ export class ElectronHost implements UiHost {
     this.installIpc()
     const electronDir = electronDistDir()
     const rendererHtml = path.join(electronDir, "renderer.html")
+    const headless = guiHeadless()
     this.window = new BrowserWindow({
       width: 960,
       height: 720,
       title: appName(),
+      show: !headless,
+      // A hidden window is not painted at all unless we ask for it, and
+      // capturePage() then returns a blank image.
+      paintWhenInitiallyHidden: true,
       webPreferences: {
         preload: path.join(electronDir, "preload.js"),
         contextIsolation: true,
         nodeIntegration: false,
+        // Chromium throttles timers and rAF in background windows. Headless
+        // runs are always background, so redisplay would stall.
+        backgroundThrottling: false,
       },
     })
+    if (headless && process.platform === "darwin") app.dock?.hide()
     await this.window.loadFile(rendererHtml)
     this.window.on("resize", () => {
       for (const handler of this.resizeHandlers) handler(this.getViewport())
@@ -93,6 +117,9 @@ export class ElectronHost implements UiHost {
    * already owns the combo -- a missing hotkey must not stop the editor booting.
    */
   private registerGlobalActivation(): void {
+    // A global hotkey in a headless test run would hijack the key combo from the
+    // user's real editor session.
+    if (guiHeadless()) return
     const accelerator = process.env.JEMACS_GUI_GLOBAL_HOTKEY ?? DEFAULT_GLOBAL_ACTIVATE_ACCELERATOR
     if (!accelerator) return
     try {
@@ -114,6 +141,9 @@ export class ElectronHost implements UiHost {
 
   /** Bring a jemacs window to the front from wherever the user currently is. */
   private activate(): void {
+    // Never raise or focus a window in headless mode: that is exactly the
+    // takeover this mode exists to prevent.
+    if (guiHeadless()) return
     const win = this.activationTarget()
     if (!win) return
     if (process.platform === "darwin") app.show()
@@ -181,6 +211,11 @@ export class ElectronHost implements UiHost {
     this.inputHandlers.push(handler)
   }
 
+  /** Called after new glyph widths arrive, so the kernel can re-wrap. */
+  onFontMetrics(handler: () => void): void {
+    this.fontMetricsHandlers.push(handler)
+  }
+
   onResize(handler: ResizeHandler): void {
     this.resizeHandlers.push(handler)
   }
@@ -194,6 +229,11 @@ export class ElectronHost implements UiHost {
       // foreground one.
       const frameId = this.frameIdForWebContents(event.sender)
       for (const handler of this.inputHandlers) void handler(payload, frameId)
+    })
+    ipcMain.on("jemacs:font-metrics", (_event, batch: Record<string, Record<string, number>>, reset: boolean) => {
+      if (!batch || typeof batch !== "object") return
+      this.capabilities.fontMetrics.merge(batch, reset === true)
+      for (const handler of this.fontMetricsHandlers) handler()
     })
     ipcMain.handle("jemacs:read-clipboard", () => clipboard.readText())
     ipcMain.on("jemacs:hide-application", () => app.hide())
@@ -246,10 +286,13 @@ export class ElectronHost implements UiHost {
       width: 960,
       height: 720,
       title: appName(),
+      show: !guiHeadless(),
+      paintWhenInitiallyHidden: true,
       webPreferences: {
         preload: path.join(electronDir, "preload.js"),
         contextIsolation: true,
         nodeIntegration: false,
+        backgroundThrottling: false,
       },
     })
     void win.loadFile(path.join(electronDir, "renderer.html"))
@@ -280,6 +323,20 @@ export class ElectronHost implements UiHost {
     const win = this.frameWindows.values().next().value ?? this.window
     if (!win || win.isDestroyed()) return undefined
     return await win.webContents.executeJavaScript(expression) as T
+  }
+
+  /**
+   * Write a PNG of the primary renderer to `filePath` and return that path.
+   *
+   * This reads the pixels Chromium composited, so it works with a hidden window
+   * and over ssh. It replaces `screencapture`, which needs a visible window.
+   */
+  async capturePage(filePath: string): Promise<string | null> {
+    const win = this.frameWindows.values().next().value ?? this.window
+    if (!win || win.isDestroyed()) return null
+    const image = await win.webContents.capturePage()
+    await writeFile(filePath, image.toPNG())
+    return filePath
   }
 }
 

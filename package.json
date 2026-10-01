@@ -10,6 +10,7 @@
     "dev": "bun run src/main.ts",
     "dev:gui": "JEMACS_HOME=$PWD bun run scripts/build-electron.ts && JEMACS_HOME=$PWD npx electron dist/electron/bootstrap.mjs",
     "smoke:gui": "JEMACS_HOME=$PWD bun run scripts/build-electron.ts && JEMACS_HOME=$PWD npx electron dist/electron/bootstrap.mjs --smoke-gui",
+    "smoke:gui:headless": "JEMACS_HOME=$PWD bun run scripts/build-electron.ts && JEMACS_HOME=$PWD JEMACS_GUI_HEADLESS=1 npx electron dist/electron/bootstrap.mjs --smoke-gui",
     "preview:gui": "bun run scripts/serve-gui-preview.ts",
     "dev:self": "bun run src/main.ts src/main.ts",
     "build:gui": "bun run scripts/build-electron.ts",

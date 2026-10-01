@@ -32,12 +32,33 @@ export function applyTheme(text: string, spans: TextSpan[], theme: Theme, option
     if (start === end) continue
     const style = ordered.reduce<FaceStyle | undefined>((merged, span) => {
       if (span.start > start || span.end < end) return merged
-      const faceStyle = resolveFace(span.face, theme, options.buffer)
+      const faceStyle = withoutDefaultFont(resolveFace(span.face, theme, options.buffer), defaultStyle)
       return mergeFaceStyles(mergeFaceStyles(merged, faceStyle), span.style)
     }, defaultStyle)
     chunks.push(themedChunk(text.slice(start, end), style))
   }
   return { chunks }
+}
+
+/**
+ * Drop a face's family and height when they are only the default's.
+ *
+ * Every face inherits the (buffer-remapped) default font so it has one, but in
+ * Emacs an attribute a face does not specify never overrides the face below
+ * it. Without this the `region` face reset a selected heading or code span to
+ * the body font: the text shrank and the row re-wrapped while the mark was
+ * active. A default-equal font adds nothing on its own, so dropping it only
+ * changes the case where it would have overridden a different font.
+ */
+function withoutDefaultFont(style: FaceStyle | undefined, defaultStyle: FaceStyle | undefined): FaceStyle | undefined {
+  if (!style) return style
+  const sameFamily = style.family != null && style.family === defaultStyle?.family
+  const sameHeight = style.height != null && style.height === defaultStyle?.height && style.heightScale == null
+  if (!sameFamily && !sameHeight) return style
+  const out = { ...style }
+  if (sameFamily) delete out.family
+  if (sameHeight) delete out.height
+  return out
 }
 
 function themedChunk(text: string, style?: FaceStyle): ThemedChunk {

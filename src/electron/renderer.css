@@ -44,6 +44,36 @@ html, body { margin: 0; height: 100%; font-size: 14px; font-family: var(--jemacs
  * line-number gutter) that a proportional font would otherwise collapse.
  * `min-height` gives a blank line the same box as a full one. */
 .window-body.web-body .body-row { white-space: pre-wrap; min-height: 1.35em; }
+/* Pixel-wrapped text column: the kernel broke each row at the column width
+ * with the same glyph widths this page measured, so a row must never wrap
+ * again -- a second wrap here is what made C-n skip screen rows. The row box
+ * is exactly the column (margin centres it), so decorations such as a code
+ * panel paint the column, not the whole window. Row selection by y and the
+ * caret both measure DOM rects, so the margin needs no click handling. */
+.window-body.web-body.text-column .body-row {
+  white-space: pre;
+  margin-left: var(--jemacs-column-left, 0px);
+  width: calc(var(--jemacs-column-width, 100%) + 4px);
+  padding-left: var(--jemacs-row-inset, 0px);
+  padding-right: var(--jemacs-row-inset-right, 0px);
+  overflow: visible;
+}
+/* Row decorations. The kernel owns every px of padding (it wrapped and costed
+ * the rows with them); CSS adds only colour, rules and radii, never width. */
+.text-column .body-row.row-code,
+.text-column .body-row.row-code-fence-open,
+.text-column .body-row.row-code-fence-close { background: color-mix(in srgb, currentColor 7%, transparent); }
+.text-column .body-row.row-code-fence-open.row-first { border-top-left-radius: 6px; border-top-right-radius: 6px; }
+.text-column .body-row.row-code-fence-close.row-last { border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; }
+.text-column .body-row.row-code-fence-open > span,
+.text-column .body-row.row-code-fence-close > span { opacity: 0.5; }
+/* An inset shadow, not a border: a border would take width from the text. */
+.text-column .body-row.row-quote { box-shadow: inset 3px 0 0 color-mix(in srgb, currentColor 35%, transparent); }
+.text-column .body-row.row-hr {
+  background: linear-gradient(color-mix(in srgb, currentColor 25%, transparent), color-mix(in srgb, currentColor 25%, transparent)) center / 100% 1px no-repeat;
+}
+.text-column .body-row.row-frontmatter > span { opacity: 0.7; }
+.text-column .body-row.row-setext-underline > span { opacity: 0.4; }
 .jemacs-caret { position: absolute; width: 2px; border-radius: 1px; background: #d4d4d4; pointer-events: none; animation: jemacs-blink 1.1s ease-in-out infinite; will-change: opacity; }
 /* Block cursor (`cursor-type` = box): covers the glyph under point, so it is
  * blended rather than painted over -- `difference` against a light caret colour
@@ -103,3 +133,15 @@ html, body { margin: 0; height: 100%; font-size: 14px; font-family: var(--jemacs
 .split-col { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .jemacs-child-frame { position: absolute; z-index: 20; border: 1px solid #665c54; box-shadow: 0 8px 24px rgba(0,0,0,.35); overflow: hidden; }
 .jemacs-child-frame-body { padding: 6px 8px; overflow: auto; max-height: inherit; white-space: pre-wrap; line-height: 1.35; }
+/* Inline image (markdown-display-inline-images): the link text stays as a
+ * faint caption line (font-lock dims it), so point and editing still work on
+ * it; the picture sits under it. Size and 8px gaps are the kernel's
+ * (`imageBlockPx`). */
+.text-column .body-row.row-image > img.inline-image {
+  display: block;
+  margin: 8px 0;
+  border-radius: 6px;
+  object-fit: contain;
+  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 12%, transparent);
+  pointer-events: none;
+}

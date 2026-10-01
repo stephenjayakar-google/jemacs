@@ -1,8 +1,9 @@
 import type { BufferModel } from "../kernel/buffer"
 import { getCustom } from "../runtime/custom"
 import { modeFeature } from "../modes/mode"
-import type { ThemedChunk, ThemedText } from "./themed-text"
+import { sameChunkStyle, type ThemedChunk, type ThemedText } from "./themed-text"
 import { gutterPrefixLen } from "./click-to-point"
+import { adaptivePrefixLen, chunkWidths, padSpaceWidth, prefixPadSpaces, wrapLinePx, type DisplayImage, type PixelWrapLayout } from "./pixel-wrap"
 
 const MARKDOWN_FILL_COLUMN = "markdown-fill-column"
 const MARKDOWN_VISUAL_FILL = "markdown-visual-fill-column-mode"
@@ -10,7 +11,17 @@ const ADAPTIVE_WRAP = "adaptive-wrap-prefix-mode"
 const LIST_PREFIX_RE = /^(\s*)(?:[-*+]|\d+[.)])\s+/
 const QUOTE_PREFIX_RE = /^(\s*>+\s*)/
 
-export type DisplayFilterResult = { text: string; map: (n: number) => number; unmap?: (n: number) => number }
+export type DisplayFilterResult = {
+  text: string
+  map: (n: number) => number
+  unmap?: (n: number) => number
+  /** Row kind of each display line (`heading-1`, `code`, `quote`, ...), for
+   *  hosts that decorate rows. Only set when the buffer is drawn as a pixel
+   *  text column (`PIXEL_DISPLAY_LOCAL`). */
+  lineKinds?: ReadonlyArray<string | undefined>
+  /** Image drawn under a display line (inline images), by display line. */
+  lineImages?: ReadonlyArray<DisplayImage | undefined>
+}
 
 /** Buffer text projected through the mode display filter (if any). */
 export function displayTextForBuffer(buffer: BufferModel): string {
@@ -31,8 +42,18 @@ export function applyRestrictionDisplayFilter(buffer: BufferModel, filter: Displ
   const displayStart = Math.max(0, Math.min(baseMap(start), baseText.length))
   const displayEnd = Math.max(displayStart, Math.min(baseMap(end), baseText.length))
   const text = baseText.slice(displayStart, displayEnd)
+  let lineKinds = filter?.lineKinds
+  let lineImages = filter?.lineImages
+  if (lineKinds || lineImages) {
+    let firstLine = 0
+    for (let i = baseText.indexOf("\n"); i !== -1 && i < displayStart; i = baseText.indexOf("\n", i + 1)) firstLine++
+    lineKinds = lineKinds?.slice(firstLine)
+    lineImages = lineImages?.slice(firstLine)
+  }
   return {
     text,
+    ...(lineKinds ? { lineKinds } : {}),
+    ...(lineImages ? { lineImages } : {}),
     map: n => Math.max(0, Math.min(displayEnd, baseMap(Math.max(start, Math.min(end, n)))) - displayStart),
     unmap: n => {
       const local = Math.max(0, Math.min(n, text.length))
@@ -209,6 +230,7 @@ export function wrapBodyRowsWithMap(
   wordWrap = false,
   keepRowContaining?: string,
   adaptiveWrap = false,
+  pixel?: (PixelWrapLayout & { lineInsetPx?: (line: number) => number }) | null,
 ): { text: ThemedText; rows: WrappedRow[] } {
   const logicalRows = splitLogicalRows(body)
   // Report ranges against the line's content: drop the gutter that was
@@ -220,20 +242,31 @@ export function wrapBodyRowsWithMap(
   }
   // Too narrow to wrap: every logical row renders as exactly one physical row,
   // and the body is handed back untouched (including any overflow rows).
-  if (cols == null || cols <= padLen + 1) {
+  if (!pixel && (cols == null || cols <= padLen + 1)) {
     return {
       text: body,
       rows: logicalRows.map((row, line) => ({ line, start: 0, end: content(row, row.length), pad: padLen })),
     }
   }
+  const padPx = pixel ? padSpaceWidth(pixel) : 0
   const rows: StyledChar[][] = []
   const map: WrappedRow[] = []
   logicalRows.forEach((row, line) => {
     const text = row.map(c => c.ch).join("")
     // The gutter/cursor glyph sit in front of the buffer text, so measure the
     // adaptive prefix on the content itself, not on the rendered row.
-    const extraPad = adaptiveWrap ? adaptiveWrapPrefixLen(text.slice(padLen).replace(/^[\u2588]/, "")) : 0
-    for (const [start, end] of wrapPlainLine(text, cols, padLen, wordWrap, extraPad)) {
+    // The pixel path measures the prefix the way its row counts and `C-n` do
+    // (`adaptivePrefixLen` knows the display bullets and checkbox glyphs), so
+    // a wrapped list item indents its continuation rows under its text.
+    const body = text.slice(padLen).replace(/^[\u2588\u200b]/, "")
+    const widths = pixel ? chunkWidths(chunksFromStyledChars(row), pixel) : undefined
+    const extraPad = !adaptiveWrap ? 0
+      : pixel ? prefixPadSpaces(widths!, text.length - body.length, adaptivePrefixLen(body), padPx)
+      : adaptiveWrapPrefixLen(body)
+    const ranges = pixel
+      ? wrapLinePx(row.map(c => c.ch), widths!, Math.max(pixel.columnPx / 4, pixel.columnPx - (pixel.lineInsetPx?.(line) ?? 0)), wordWrap, extraPad * padPx)
+      : wrapPlainLine(text, cols!, padLen, wordWrap, extraPad)
+    for (const [start, end] of ranges) {
       const continuation = map.length > 0 && map[map.length - 1]!.line === line
       const pad = continuation ? padLen + extraPad : padLen
       const out = continuation ? padChars(pad) : []
@@ -253,6 +286,7 @@ export function wrapBodyRowsWithMap(
   return { text: { chunks: out }, rows: map.slice(from, to) }
 }
 
+/** One UTF-16 unit, so row offsets index the display text directly. */
 type StyledChar = { ch: string; style: Omit<ThemedChunk, "text"> }
 
 /** Which slice of the wrapped rows survives the `maxRows` budget, as `[from, to)`. */
@@ -278,7 +312,10 @@ function splitLogicalRows(body: ThemedText): StyledChar[][] {
   const rows: StyledChar[][] = [[]]
   for (const chunk of body.chunks) {
     const { text, ...style } = chunk
-    for (const ch of text) {
+    // By UTF-16 unit, not code point: `WrappedRow` offsets feed click and caret
+    // math that indexes JS strings, so an astral glyph must count as two.
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!
       if (ch === "\n") rows.push([])
       else rows[rows.length - 1]!.push({ ch, style })
     }
@@ -295,21 +332,44 @@ function wrapPlainLine(line: string, cols: number, padLen: number, wordWrap: boo
   let first = true
   while (start < line.length || (first && line.length === 0)) {
     const capacity = first ? cols : cols - pad
-    if (start + capacity >= line.length) {
+    // Advance by display columns, not string indices: the GUI caret marker is
+    // zero-width, so counting it would break the line one character early and
+    // make the paragraph reflow as point moves.
+    const end = advanceColumns(line, start, capacity)
+    if (end >= line.length) {
       ranges.push([start, line.length])
       break
     }
-    let end = start + capacity
+    let stop = end
     if (wordWrap) {
-      const boundary = wordWrapBoundary(line, start, end)
-      if (boundary > start) end = boundary
+      const boundary = wordWrapBoundary(line, start, stop)
+      if (boundary > start) stop = boundary
     }
-    ranges.push([start, end])
-    start = end
+    ranges.push([start, stop])
+    start = stop
     first = false
   }
   return ranges
 }
+
+/** Index reached after consuming `capacity` display columns from `start`.
+ *
+ *  Zero-width characters (the GUI caret placeholder) advance the index without
+ *  consuming a column, so a line wraps in exactly the same place whether or not
+ *  point happens to sit on it. */
+function advanceColumns(line: string, start: number, capacity: number): number {
+  let i = start
+  let used = 0
+  while (i < line.length && used < capacity) {
+    if (!isZeroWidth(line[i]!)) used++
+    i++
+  }
+  // Trailing zero-width chars cost nothing, so keep them on this row.
+  while (i < line.length && isZeroWidth(line[i]!)) i++
+  return i
+}
+
+const isZeroWidth = (ch: string): boolean => ch === "\u200b"
 
 function wordWrapBoundary(line: string, start: number, hardEnd: number): number {
   for (let i = hardEnd; i > start; i--) {
@@ -326,14 +386,9 @@ function chunksFromStyledChars(chars: StyledChar[]): ThemedChunk[] {
   const chunks: ThemedChunk[] = []
   for (const { ch, style } of chars) {
     const last = chunks[chunks.length - 1]
-    if (last && themedChunkStyleEqual(last, style)) last.text += ch
+    if (last && sameChunkStyle(last, style)) last.text += ch
     else chunks.push({ text: ch, ...style })
   }
   return chunks
 }
 
-function themedChunkStyleEqual(a: Omit<ThemedChunk, "text">, b: Omit<ThemedChunk, "text">): boolean {
-  return a.fg === b.fg && a.bg === b.bg && a.bold === b.bold && a.italic === b.italic
-    && a.underline === b.underline && a.family === b.family && a.height === b.height
-    && a.heightScale === b.heightScale
-}

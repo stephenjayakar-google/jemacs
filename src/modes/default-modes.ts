@@ -25,6 +25,7 @@ import { installTexModes } from "./tex"
 import { installCmakeMode } from "./cmake"
 import { installGoModModes } from "./go-mod"
 import { installLogModes } from "./log"
+import { installSqlMode } from "./sql"
 
 export function installDefaultModes(): void {
   installLinumMode()
@@ -57,6 +58,7 @@ export function installDefaultModes(): void {
   installCmakeMode()
   installGoModModes()
   installLogModes()
+  installSqlMode()
   installBufferListMode()
   installDiredMode()
 }

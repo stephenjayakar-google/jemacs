@@ -189,6 +189,54 @@ describe("jterm: char-mode / copy-mode", () => {
     expect(editor.overridingTerminalLocalMap).toBeNull()
   })
 
+  test("C-tab / C-S-tab still switch windows in char-mode", async () => {
+    const editor = makeEditor()
+    install(editor)
+    const buffer = editor.scratch("*jterm*", "", "jterm-mode")
+    const pty = fakePty()
+    sessions.set(buffer, new JTermSession(editor, buffer, pty, makeXTerm(4, 20), 4, 20, "jterm"))
+
+    await editor.run("jterm-char-mode")
+    expect(jtermRawMap.get("C-tab")).toBe("other-window")
+    expect(jtermRawMap.get("C-S-tab")).toBe("previous-window-any-frame")
+
+    // The keys must not reach the pty.
+    await editor.handleKey({ name: "tab", ctrl: true, sequence: "\x1b[9;5u", raw: "\x1b[9;5u" })
+    await editor.handleKey({ name: "tab", ctrl: true, shift: true, sequence: "\x1b[9;6u", raw: "\x1b[9;6u" })
+    await Promise.resolve()
+    expect(pty.sent).toBe("")
+  })
+
+  test("char-mode bindings stop when another buffer becomes current", async () => {
+    const editor = makeEditor()
+    install(editor)
+    const buffer = editor.scratch("*jterm*", "", "jterm-mode")
+    const pty = fakePty()
+    sessions.set(buffer, new JTermSession(editor, buffer, pty, makeXTerm(4, 20), 4, 20, "jterm"))
+
+    await editor.run("jterm-char-mode")
+    expect(jtermRawMap.get("k")).toBe("jterm-send-raw")
+
+    // User selects another window; the override is editor-global, so the guard
+    // must switch it off for the other buffer.
+    const other = editor.scratch("*other*", "hello\nworld", "text")
+    editor.switchToBuffer(other.id)
+    expect(jtermRawMap.get("k")).toBeUndefined()
+    expect(jtermRawMap.get("C-c C-c")).toBeUndefined()
+    expect(jtermRawMap.hasPrefix("C-c")).toBe(false)
+
+    other.readOnly = false
+    await editor.handleKey({ name: "k", sequence: "k" })
+    await Promise.resolve()
+    expect(pty.sent).toBe("")
+    expect(other.text.startsWith("k")).toBe(true)
+
+    // Back in the jterm buffer the bindings apply again.
+    editor.switchToBuffer(buffer.id)
+    expect(jtermRawMap.get("k")).toBe("jterm-send-raw")
+  })
+
+
   test("char-mode without a session is a no-op (no crash)", async () => {
     const editor = makeEditor()
     install(editor)

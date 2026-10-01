@@ -1,7 +1,7 @@
 import type { Editor, CompletingReadFunction, MinibufferCompletionFrontend } from "../src/kernel/editor"
 import { createPluginContext, type PluginContext } from "../src/runtime/plugin-context"
 import { BufferModel } from "../src/kernel/buffer"
-import { fileCompletionCandidates, splitCompletionInput } from "../src/kernel/completion"
+import { fileCompletionCandidatesBounded, splitCompletionInput } from "../src/kernel/completion"
 import { defcustom, defvar, getCustom } from "../src/runtime/custom"
 
 type VerticoState = {
@@ -99,6 +99,11 @@ export function install(editor: Editor, ctx: PluginContext = createPluginContext
   editor.defineKey("minibuffer", "down", "vertico-next")
   editor.defineKey("minibuffer", "C-p", "vertico-previous")
   editor.defineKey("minibuffer", "C-n", "vertico-next")
+  // fido binds minibuffer C-s/C-r to its own movement commands at install(); those
+  // commands no-op while vertico owns the frontend, so rebind them here (t: C-s/C-r
+  // dead in find-file under vertico-mode).
+  editor.defineKey("minibuffer", "C-s", "vertico-next")
+  editor.defineKey("minibuffer", "C-r", "vertico-previous")
   editor.defineKey("minibuffer", "M-<", "vertico-first")
   editor.defineKey("minibuffer", "M->", "vertico-last")
   editor.defineKey("minibuffer", "C-v", "vertico-scroll-up")
@@ -148,12 +153,22 @@ async function verticoRefresh(editor: Editor): Promise<void> {
     scheduleDynamicQuery(editor, inputState)
     return
   }
-  const candidates = request.completion === "file"
-    ? await fileCompletionCandidates(input, request.fileCompletionDirectory ?? process.cwd())
-    : request.collection ?? []
+  let pending = false
+  let settled: Promise<unknown> | null = null
+  let candidates: string[]
+  if (fileCompletion) {
+    // Bounded, so a slow mount (NFS, SMB, sshfs) cannot stall the key loop: paint what the
+    // listing cache holds now, then repaint when the outstanding readdir/stat lands.
+    const result = await fileCompletionCandidatesBounded(input, request.fileCompletionDirectory ?? process.cwd())
+    candidates = result.candidates
+    pending = result.pending
+    settled = result.settled
+  } else {
+    candidates = request.collection ?? []
+  }
   if (editor.minibuffer !== request || !sameInput(inputState, currentInput(editor))) return
   const state = ensureState(editor)
-  state.querying = false
+  state.querying = pending
   state.candidates = sortCandidates(filterCandidates(editor, candidates, input, fileCompletion))
   state.displayCandidates = state.candidates.map(candidate => displayCandidate(candidate, input, fileCompletion))
   state.groups = state.candidates.map(candidate => candidateGroup(candidate, fileCompletion))
@@ -166,7 +181,26 @@ async function verticoRefresh(editor: Editor): Promise<void> {
   else if (state.index >= state.candidates.length) state.index = state.candidates.length - 1
   computeScroll(state)
   showVerticoCompletions(editor, state)
+  if (settled) void repaintWhenListingLands(editor, request, inputState, settled)
 }
+
+/**
+ * Wait for a slow directory listing, then refresh once if the prompt still shows the same input.
+ *
+ * `verticoRefresh` runs from `post-command-hook`, which the key loop awaits, so it must not wait
+ * for the filesystem. It returns partial candidates instead and hands the wait to this function.
+ */
+async function repaintWhenListingLands(
+  editor: Editor,
+  request: NonNullable<Editor["minibuffer"]>,
+  inputState: VerticoInput,
+  settled: Promise<unknown>,
+): Promise<void> {
+  await settled.catch(() => {})
+  if (editor.minibuffer !== request || !sameInput(inputState, currentInput(editor))) return
+  await verticoRefresh(editor)
+}
+
 
 /**
  * Queue a dynamic-collection query for `inputState`, replacing any query already queued.

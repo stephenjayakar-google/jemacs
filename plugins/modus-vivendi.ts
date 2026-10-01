@@ -46,6 +46,11 @@ export const modusVivendiPalette = {
   bgChangedRefine: "#4a4a00",
   bgRemovedRefine: "#781a1f",
   bgHoverSecondary: "#654a39",
+  // `modus-themes` rainbow heading set, read back from Emacs with
+  // `(face-attribute 'markdown-header-face-N :foreground)`.
+  blueFaint: "#82b0ec",
+  greenFaint: "#88ca9f",
+  redFaint: "#ff9580",
 } as const
 
 const p = modusVivendiPalette
@@ -98,6 +103,19 @@ export const modusVivendiTheme = defineTheme("modus-vivendi", {
   diffRefineChanged: { bg: p.bgChangedRefine },
   diffRefineRemoved: { bg: p.bgRemovedRefine },
   diffRefineAdded: { bg: p.bgAddedRefine },
+  // Markdown, matching `modus-vivendi` in Emacs. Header levels use the theme's
+  // rainbow heading set, so every level is a different colour instead of the
+  // flat body foreground. Values captured from the running Emacs, not guessed.
+  "markdown-header-face-1": { fg: p.fgMain, bold: true },
+  "markdown-header-face-2": { fg: p.yellowFaint, bold: true },
+  "markdown-header-face-3": { fg: p.blueFaint, bold: true },
+  "markdown-header-face-4": { fg: p.magenta, bold: true },
+  "markdown-header-face-5": { fg: p.greenFaint, bold: true },
+  "markdown-header-face-6": { fg: p.redFaint, bold: true },
+  "markdown-markup": { fg: p.fgDim },
+  "markdown-inline-code": { fg: p.cyanCooler },
+  "markdown-blockquote": { fg: p.cyanFaint },
+  "markdown-link": { fg: p.blueWarmer, underline: true },
   "magit-section-highlight": { bg: p.bgDim },
   "magit-section-heading": { fg: p.fgMain, bold: true },
   "magit-section-secondary-heading": { fg: p.fgAlt, bold: true },

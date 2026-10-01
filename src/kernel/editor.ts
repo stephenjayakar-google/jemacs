@@ -18,7 +18,14 @@ import type { HostCapabilities } from "../display/protocol"
 import type { TerminalData } from "../display/protocol"
 import type { ViewportSize } from "../display/viewport"
 import { composeTheme, defface } from "../runtime/faces"
-import { fileCompletionCandidates } from "./completion"
+import {
+  fileCompletionCandidates,
+  fileCompletionCandidatesBounded,
+  FILE_COMPLETION_CACHE_TTL_DEFAULT,
+  FILE_COMPLETION_TIMEOUT_DEFAULT,
+  type FileCompletionOptions,
+  type FileCompletionResult,
+} from "./completion"
 import { findMatchBackward, findMatchForward, isearchPrompt, type IsearchMatch, type IsearchState } from "./isearch"
 import {
   cloneWindowNode,
@@ -350,6 +357,20 @@ export class Editor {
     this.selectedFrameId = initialFrame.id
     defcustom("transient-values-file", "string", join(homedir(), ".jemacs", "transient.json"), "File where transient-saved values are persisted.", "transient")
     defcustom("transient-default-level", "integer", 4, "Default visibility level for transient groups and suffixes.", "transient")
+    defcustom(
+      "file-completion-timeout",
+      "integer",
+      FILE_COMPLETION_TIMEOUT_DEFAULT,
+      "Milliseconds find-file completion waits for a directory listing before it shows partial results. Raise it on a fast disk, lower it on a slow network mount.",
+      "minibuffer",
+    )
+    defcustom(
+      "file-completion-cache-ttl",
+      "integer",
+      FILE_COMPLETION_CACHE_TTL_DEFAULT,
+      "Milliseconds a directory listing stays cached for find-file completion.",
+      "minibuffer",
+    )
     this.command("transient-resume", ({ editor }) => editor.resumeTransient(), "Resume the last suspended transient popup.")
     this.command("transient-quit-one", ({ editor }) => editor.transientQuitOne(), "Quit the active transient popup.")
     this.command("transient-quit-all", ({ editor }) => editor.transientQuitAll(), "Quit the active transient popup and its stack.")
@@ -2086,13 +2107,30 @@ export class Editor {
   }
 
   async minibufferCollection(): Promise<string[]> {
+    return (await this.minibufferCollectionBounded()).candidates
+  }
+
+  /**
+   * Candidates for the active prompt, plus the pending state of slow file I/O.
+   *
+   * File prompts are time-bounded so a slow mount cannot stall the key loop. `settled` resolves
+   * when the outstanding listing lands; a frontend awaits it and queries again.
+   */
+  async minibufferCollectionBounded(options: FileCompletionOptions = {}): Promise<FileCompletionResult> {
     const request = this.minibuffer
-    if (!request) return []
-    if (request.dynamicCollection) return await this.queryDynamicCollection(this.minibufferInput()) ?? []
-    if (request.completion === "file") {
-      return fileCompletionCandidates(this.minibufferInput(), request.fileCompletionDirectory ?? process.cwd())
+    if (!request) return { candidates: [], pending: false, settled: null }
+    if (request.dynamicCollection) {
+      const candidates = await this.queryDynamicCollection(this.minibufferInput()) ?? []
+      return { candidates, pending: false, settled: null }
     }
-    return request.collection ?? []
+    if (request.completion === "file") {
+      return fileCompletionCandidatesBounded(
+        this.minibufferInput(),
+        request.fileCompletionDirectory ?? process.cwd(),
+        options,
+      )
+    }
+    return { candidates: request.collection ?? [], pending: false, settled: null }
   }
 
   /**

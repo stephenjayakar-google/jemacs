@@ -1,3 +1,4 @@
+import { applyTheme } from "../../src/display/theme"
 import { describe, expect, test } from "bun:test"
 import { BufferModel } from "../../src/kernel/buffer"
 import { buildDisplayModel } from "../../src/display/build-display-model"
@@ -7,7 +8,7 @@ import { themedTextPlain } from "../../src/display/themed-text"
 import { makeEditor } from "./helper"
 import { keySeq } from "../harness"
 import { getCustom, setCustom } from "../../src/runtime/custom"
-import { FIXED_PITCH_FAMILY, getBufferFaceRemap, VARIABLE_PITCH_FAMILY } from "../../src/runtime/faces"
+import { getBufferFaceRemap } from "../../src/runtime/faces"
 import { enterMode } from "../../src/modes/mode"
 import {
   install,
@@ -93,6 +94,15 @@ test("markdown emphasis uses italic face", () => {
   expect(spans.some(span => String(span.face) === "markdown-emphasis")).toBe(true)
 })
 
+test("_emphasis_ renders italic while its underscore markers stay upright", () => {
+  const editor = makeEditor()
+  install(editor)
+  const buffer = editor.scratch("u.md", "the _right_ move\n", "markdown")
+  const chunks = applyTheme(buffer.text, [...editor.fontLock(buffer)], editor.theme, { buffer }).chunks
+  expect(chunks.find(c => c.text === "right")?.italic).toBe(true)
+  expect(chunks.filter(c => c.text === "_").every(c => !c.italic)).toBe(true)
+})
+
 test("gfm font-lock highlights bare URL autolinks and markdown does not", () => {
   const editor = makeEditor()
   install(editor)
@@ -130,20 +140,24 @@ test("gfm strikethrough font-lock marks delimiters and body", () => {
   expect(spans.some(span => String(span.face) === "markdown-markup" && span.start === 6 && span.end === 8)).toBe(true)
 })
 
-test("gfm strikethrough delimiters participate in markdown-hide-markup", () => {
+test("gfm strikethrough delimiters stay visible under markdown-hide-markup", () => {
   const buffer = new BufferModel({ name: "README.md", text: "~~gone~~\n", mode: "gfm" })
   buffer.locals.set("markdown-hide-markup", true)
 
-  expect(markdownDisplayFilter(buffer)?.text).toBe("gone\n")
+  // `markdown-hide-markup` composes block markers only; inline delimiters keep
+  // rendering because the variable never enters `buffer-invisibility-spec`.
+  expect(markdownDisplayFilter(buffer)?.text).toBe("~~gone~~\n")
 })
 
-test("gfm keeps intraword underscores literal while markdown hiding preserves existing behavior", () => {
+test("intraword underscores stay literal in both markdown and gfm", () => {
   const markdown = new BufferModel({ name: "doc.md", text: "foo_bar_baz\n", mode: "markdown" })
   markdown.locals.set("markdown-hide-markup", true)
   const gfm = new BufferModel({ name: "README.md", text: "foo_bar_baz\n", mode: "gfm" })
   gfm.locals.set("markdown-hide-markup", true)
 
-  expect(markdownDisplayFilter(markdown)?.text).toBe("foobarbaz\n")
+  // markdown-mode renders `foo_bar_baz` verbatim in both dialects; the old
+  // "foobarbaz" expectation came from jemacs hiding inline markup itself.
+  expect(markdownDisplayFilter(markdown)?.text).toBe("foo_bar_baz\n")
   expect(markdownDisplayFilter(gfm)?.text).toBe("foo_bar_baz\n")
 })
 
@@ -486,9 +500,16 @@ test("markdown-mode onEnter applies proportional default face remap", () => {
   install(editor)
   const buffer = new BufferModel({ name: "doc.md", text: "# Title", mode: "text" })
   enterMode(buffer, "markdown")
-  expect(getBufferFaceRemap(buffer, "default")?.family).toBe(VARIABLE_PITCH_FAMILY)
-  expect(getBufferFaceRemap(buffer, "default")?.height).toBeUndefined()
-  expect(getBufferFaceRemap(buffer, "string")?.family).toBe(FIXED_PITCH_FAMILY)
+  // `(face-remap-add-relative 'default :family "Helvetica Neue" :height 200)`.
+  // `font-at` on body prose in the live Emacs reports Helvetica Neue at size 20;
+  // 200 is Emacs `:height`, i.e. tenths of a point.
+  expect(getBufferFaceRemap(buffer, "default")?.family).toContain("Helvetica Neue")
+  expect(getBufferFaceRemap(buffer, "default")?.height).toBe(200)
+  // Emacs remaps only `default`. `markdown-code-face` and friends declare no
+  // `:family`, so code inherits the proportional body font -- `font-at` inside
+  // a fenced block reports Helvetica Neue, not Menlo.
+  expect(getBufferFaceRemap(buffer, "string")).toBeUndefined()
+  expect(getBufferFaceRemap(buffer, "markdown-markup")).toBeUndefined()
 })
 
 describe("markdown-cycle", () => {
@@ -967,7 +988,13 @@ describe("markdownDisplayFilter", () => {
     expect(result?.text).not.toContain("deep")
   })
 
-  test("hides ATX header and emphasis markup when markdown-hide-markup is on", () => {
+  // Ground truth, markdown-mode 20251028.412 with `markdown-hide-markup` t:
+  // block markers compose (`# ` -> "", `* ` -> "\u25cf", `>` -> "\u258c", `---` -> a rule)
+  // but inline markup stays visible. Setting the variable never adds
+  // `markdown-markup` to `buffer-invisibility-spec`; only the interactive
+  // `markdown-toggle-markup-hiding` does. Checked in the live GUI: with it set,
+  // `(invisible-p 'markdown-markup)` is nil and the `**` still displays.
+  test("composes ATX header markers but keeps inline emphasis visible", () => {
     const buffer = new BufferModel({
       name: "doc.md",
       text: "# Title\nSome **bold** text\n",
@@ -975,8 +1002,24 @@ describe("markdownDisplayFilter", () => {
     })
     buffer.locals.set("markdown-hide-markup", true)
     const result = markdownDisplayFilter(buffer)
-    expect(result?.text).toBe("Title\nSome bold text\n")
+    expect(result?.text).toBe("Title\nSome **bold** text\n")
     expect(buffer.text).toBe("# Title\nSome **bold** text\n")
+  })
+
+  test("composes list, blockquote and horizontal-rule markers", () => {
+    const buffer = new BufferModel({
+      name: "doc.md",
+      text: "* one\n  * nested\n\n> quote\n\n---\n",
+      mode: "markdown",
+    })
+    buffer.locals.set("markdown-hide-markup", true)
+    // `markdown--fontify-hrs-view-mode` sizes the rule from the window, not from
+    // the source dashes: `(1- (window-body-width))`.
+    buffer.locals.set("window-body-cols", 40)
+    const result = markdownDisplayFilter(buffer)
+    // `markdown-list-item-bullets` cycles by depth, and the composed `>` keeps
+    // the space after it, so the quote body still starts one column in.
+    expect(result?.text).toBe(`\u25cf one\n  \u25ce nested\n\n\u258c quote\n\n${"\u2500".repeat(39)}\n`)
   })
 
   test("reuses the hidden-markup filter cache when there are no folded ranges", () => {
@@ -991,7 +1034,7 @@ describe("markdownDisplayFilter", () => {
     expect(second).toBe(first)
   })
 
-  test("hides inline code backticks when markdown-hide-markup is on", () => {
+  test("keeps inline code backticks visible when markdown-hide-markup is on", () => {
     const buffer = new BufferModel({
       name: "doc.md",
       text: "Use `hello` here\n",
@@ -999,11 +1042,10 @@ describe("markdownDisplayFilter", () => {
     })
     buffer.locals.set("markdown-hide-markup", true)
     const result = markdownDisplayFilter(buffer)
-    expect(result?.text).toBe("Use hello here\n")
-    expect(result?.text).not.toContain("`")
+    expect(result?.text).toBe("Use `hello` here\n")
   })
 
-  test("hides fenced code delimiter lines when markdown-hide-markup is on", () => {
+  test("keeps fenced code delimiter lines when markdown-hide-markup is on", () => {
     const buffer = new BufferModel({
       name: "doc.md",
       text: "Before\n\n```typescript\nconst x = 1\n```\nAfter\n",
@@ -1011,8 +1053,9 @@ describe("markdownDisplayFilter", () => {
     })
     buffer.locals.set("markdown-hide-markup", true)
     const result = markdownDisplayFilter(buffer)
-    expect(result?.text).toBe("Before\n\nconst x = 1\n\nAfter\n")
-    expect(result?.text).not.toContain("```")
+    // Emacs leaves the ``` lines alone. Dropping them also renumbered every
+    // line below the block, so clicks and the caret landed on the wrong row.
+    expect(result?.text).toBe("Before\n\n```typescript\nconst x = 1\n```\nAfter\n")
   })
 
   test("composes link URLs when markdown-hide-urls is on", () => {
@@ -1063,6 +1106,8 @@ describe("markdown mouse clicks", () => {
     buffer.locals.set("markdown-visual-fill-column-center-text", true)
     const model = buildDisplayModel(editor, { lastMessage: "", viewport: { rows: 24, cols: 40 } })
     const pane = findPaneInModel(model.windows, editor.selectedWindowId)!
+    // Inline `**` renders now, so display column "Some " lands on the first
+    // `*`, and the header line above still composes its `# ` away.
     const displayBoldCol = "Some ".length
     const point = pointFromWindowClick(
       buffer.text,
@@ -1072,7 +1117,7 @@ describe("markdown mouse clicks", () => {
       pane.bodyLineBudget,
     )
 
-    expect(point).toBe(buffer.text.indexOf("bold"))
+    expect(point).toBe(buffer.text.indexOf("**bold"))
   })
 })
 
@@ -1175,7 +1220,8 @@ describe("markdown-view-mode", () => {
     expect(buffer.mode).toBe("gfm-view-mode")
     expect(buffer.locals.get("word-wrap")).toBe(true)
     expect(buffer.locals.get("markdown-hide-markup")).toBe(true)
-    expect(markdownDisplayFilter(buffer)?.text).toBe("gone\n")
+    // Inline `~~` keeps rendering; only block markers compose away.
+    expect(markdownDisplayFilter(buffer)?.text).toBe("~~gone~~\n")
   })
 })
 

@@ -83,12 +83,29 @@ function renderOverlay(state: FidoState): string {
 
 async function fidoExhibit(editor: Editor): Promise<void> {
   if (!editor.minibuffer) return
+  const request = editor.minibuffer
   const state = fidoState(editor)
   const input = editor.minibufferInput()
-  const collection = await editor.minibufferCollection()
+  // Bounded: this runs from the key loop, so a slow mount must not stall typing. Partial
+  // candidates paint now and `settled` triggers one more pass when the listing lands.
+  const result = await editor.minibufferCollectionBounded()
+  const collection = result.candidates
   state.candidates = collection.length ? flexCompleter(input, collection) : []
   if (state.selected >= state.candidates.length) state.selected = 0
   editor.setMinibufferOverlay(collection.length ? renderOverlay(state) : "")
+  if (result.settled) void fidoRepaintWhenListingLands(editor, request, input, result.settled)
+}
+
+/** Wait for a slow directory listing, then redraw once if the prompt still shows `input`. */
+async function fidoRepaintWhenListingLands(
+  editor: Editor,
+  request: NonNullable<Editor["minibuffer"]>,
+  input: string,
+  settled: Promise<unknown>,
+): Promise<void> {
+  await settled.catch(() => {})
+  if (editor.minibuffer !== request || editor.minibufferInput() !== input) return
+  await fidoExhibit(editor)
 }
 
 function fidoMove(editor: Editor, delta: number): void {
