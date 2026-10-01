@@ -67,6 +67,7 @@ const builtins: Array<[name: string, load: () => Promise<{ install: InstallFn }>
   ["undo-tree", () => import("./undo-tree")],
   ["org", () => import("./org")],
   ["markdown", () => import("./markdown")],
+  ["critique", () => import("./critique")],
   ["lean4", () => import("./lean4")],
   ["tiling", () => import("./tiling")],
   ["shadow", () => import("./shadow")],
