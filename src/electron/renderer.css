@@ -58,6 +58,11 @@ html, body { margin: 0; height: 100%; font-size: 14px; font-family: var(--jemacs
   padding-right: var(--jemacs-row-inset-right, 0px);
   overflow: visible;
 }
+/* Right-margin notes (right-margin.ts). Plain rows span the pane, so pin the
+ * note to its right edge; a text-column row is only the column, so hang the
+ * note just past it, in the space the margin reserved. */
+.body-row > .margin-note { position: absolute; top: 0; right: 0; white-space: pre; font-family: monospace; }
+.text-column .body-row > .margin-note { right: auto; left: calc(100% + 2em); }
 /* Row decorations. The kernel owns every px of padding (it wrapped and costed
  * the rows with them); CSS adds only colour, rules and radii, never width. */
 .text-column .body-row.row-code,

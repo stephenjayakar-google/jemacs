@@ -15,6 +15,7 @@ import { contentAreaLines, windowBodyLines, type ViewportSize } from "./viewport
 import { paneWrapLayoutFor, wrapBodyRowsWithMap } from "./display-wrap"
 import { imageBox, pixelRowCounts, pixelWrapFor, rowDecoration, type DisplayImage, type PixelWrapLayout } from "./pixel-wrap"
 import type { RowDecorationModel } from "./protocol"
+import { appendRightMargin, fitRightMargin } from "./right-margin"
 import {
   computeLineVisualRows,
   computeWrappedLineRows,
@@ -199,10 +200,14 @@ function layoutLeafPane(
   const lineCount = dLines.length
   let startLine = Math.max(0, Math.min(pane.startLine, lineCount - 1))
   const cursorLine = pane.selected ? pointLineCol(dText, dPoint).line - 1 : startLine
+  // A right margin narrows the text column: everything below wraps and
+  // centers within `textCols`, and the notes fill the remainder.
+  const margin = fitRightMargin(pane.rightMargin, availableCols)
+  const textCols = margin && availableCols != null ? availableCols - margin.width : availableCols
   const wrapLayout = paneWrapLayoutFor(
     dText,
     pane.locals,
-    availableCols,
+    textCols,
     showGutter,
     startLine,
     maxLines,
@@ -212,7 +217,7 @@ function layoutLeafPane(
   const lineRange = visualRowLineRange(startLine, cursorLine, maxLines, lineCount)
   const pixel = pixelWrapFor({
     locals: pane.locals,
-    cols: availableCols,
+    cols: textCols,
     showGutter,
     perFaceFonts: useVisualWeights,
     metrics: hostCapabilities?.fontMetrics,
@@ -263,15 +268,15 @@ function layoutLeafPane(
   const { wrapCols, gutterPrefixLen: gutter, wordWrap, adaptiveWrap } = paneWrapLayoutFor(
     dText,
     pane.locals,
-    availableCols,
+    textCols,
     showGutter,
     startLine,
     displayLines,
     cursorLine + 1,
   )
   const visualFill = visualFillSettings(pane.locals)
-  const contentWidth = availableCols != null
-    ? Math.max(1, availableCols - clickState.gutterPrefixLen)
+  const contentWidth = textCols != null
+    ? Math.max(1, textCols - clickState.gutterPrefixLen)
     : undefined
   const columnWidth = visualFill && contentWidth != null && wrapCols != null
     ? wrapCols - clickState.gutterPrefixLen
@@ -336,6 +341,11 @@ function layoutLeafPane(
       // `shape` omitted for the default bar so the wire model stays minimal.
       cursor = cursorIsBlock() ? { ...extracted.cursor, shape: "box" } : extracted.cursor
     }
+  }
+  // After caret extraction, so the zero-width marker never counts as a cell.
+  if (margin && textCols != null) {
+    const origins = wrapped.rows.map(r => ({ row: r.line, first: r.start === 0 }))
+    body = appendRightMargin(body, origins, startLine, margin, textCols, logical.theme, pane.buffer)
   }
 
   return {

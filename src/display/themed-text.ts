@@ -22,6 +22,11 @@ export type ThemedChunk = {
   underlineColor?: string
   /** Emacs `:box`, drawn inside the glyphs so it never changes their width. DOM hosts only. */
   box?: { color?: string; width: number }
+  /** Right-margin note cell (see `right-margin.ts`); DOM hosts pin it to the
+   *  row's right edge instead of flowing it after the text. */
+  margin?: boolean
+  /** Spaces that align a margin note on char-grid hosts; DOM hosts skip it. */
+  marginPad?: boolean
 }
 
 /** Every style field of a chunk, in one place, so merge and cache code cannot miss one. */
@@ -32,6 +37,7 @@ export function sameChunkStyle(a: Omit<ThemedChunk, "text">, b: Omit<ThemedChunk
     && a.strikeThrough === b.strikeThrough && a.overline === b.overline
     && a.underlineStyle === b.underlineStyle && a.underlineColor === b.underlineColor
     && a.box?.color === b.box?.color && a.box?.width === b.box?.width
+    && a.margin === b.margin && a.marginPad === b.marginPad
 }
 
 export type ThemedText = {

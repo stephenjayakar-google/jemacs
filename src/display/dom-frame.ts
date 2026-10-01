@@ -98,7 +98,7 @@ function rowSignature(
   const family = options.defaultFamily ?? ""
   let out = `${scale}|${defaultPx}|${family}|${options.defaultBg ?? ""}`
   for (const { chunk, text } of parts) {
-    out += `\u0000${text}\u0001${chunk.fg ?? ""}\u0001${chunk.bg ?? ""}`
+    out += `\u0000${chunk.margin ? "m" : ""}${text}\u0001${chunk.fg ?? ""}\u0001${chunk.bg ?? ""}`
       + `\u0001${chunk.bold ? 1 : 0}${chunk.italic ? 1 : 0}${chunk.underline ? 1 : 0}`
       + `\u0001${chunk.family ?? ""}\u0001${chunk.height ?? ""}\u0001${chunk.heightScale ?? ""}`
       + `\u0001${chunk.weight ?? ""}\u0001${chunk.strikeThrough ?? ""}\u0001${chunk.overline ?? ""}`
@@ -134,6 +134,9 @@ export function renderBodyRows(
   // before any DOM is touched.
   const lines: Array<Array<{ chunk: SerializedChunk; text: string }>> = [[]]
   for (const chunk of model.chunks) {
+    // Right-margin notes: the char-grid aligns them with space padding, which
+    // doesn't line up under variable-pitch faces; CSS pins the note instead.
+    if (chunk.marginPad) continue
     const parts = chunk.text.split("\n")
     for (let i = 0; i < parts.length; i++) {
       if (i > 0) lines.push([])
@@ -169,7 +172,11 @@ export function renderBodyRows(
     // Same element, new content: swap the spans rather than the row itself, so the
     // browser repaints one line instead of the whole body.
     row.replaceChildren()
-    for (const { chunk, text } of parts) renderChunk(row, { ...chunk, text }, options)
+    for (const { chunk, text } of parts) {
+      renderChunk(row, { ...chunk, text }, options)
+      if (chunk.margin) (row.lastElementChild as HTMLElement).className = "margin-note"
+    }
+    row.style.position = parts.some(p => p.chunk.margin) ? "relative" : ""
     if (decoration?.image) appendInlineImage(row, decoration.image)
     rowSignatures.set(row, signature)
     rows.push(row)

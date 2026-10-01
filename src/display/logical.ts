@@ -14,6 +14,7 @@ import type { ThemedText } from "./themed-text"
 import { TERMINAL_SURFACE_LOCAL, type TerminalSurfaceModel } from "./terminal-surface"
 import { applyRestrictionDisplayFilter, type DisplayFilterResult } from "./display-wrap"
 import { tabBarLayout, tabBarVisible } from "./tab-bar"
+import { logicalRightMargin, type LogicalRightMargin } from "./right-margin"
 
 /** Plugin-contributed modeline segments (Emacs `mode-line-misc-info`). Each fn
  *  returns a string appended after the minor-mode lighters; empty string = nothing. */
@@ -77,6 +78,8 @@ export type LogicalPane = {
   /** Optional rich table/list pane model. Plain text remains the fallback. */
   tableSurface?: TableSurfaceModel
   webSurface?: WebSurfaceModel
+  /** Notes from `right-margin-functions`, keyed by display-text line. */
+  rightMargin?: LogicalRightMargin
   readOnly: boolean
   showLineNumbers: boolean
   gutterDecorations?: GutterDecoration[]
@@ -277,6 +280,7 @@ function buildLogicalPane(editor: Editor, leaf: WindowLeaf, selectedWindowId: st
     terminalSurface: surface,
     tableSurface: safeTableSurface(buffer),
     webSurface: safeWebSurface(buffer),
+    rightMargin: logicalRightMargin(buffer, point, filt?.text ?? buffer.text, filt?.map),
     readOnly: buffer.readOnly,
     showLineNumbers: buffer.kind !== "minibuffer" && editor.showLineNumbers(buffer),
     gutterDecorations: editor.gutterDecorations(buffer),

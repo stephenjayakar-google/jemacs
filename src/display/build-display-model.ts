@@ -9,6 +9,7 @@ import { computeLineVisualRows, computeWrappedLineRows, hasNonUnitVisualRows, vi
 import { buildLogicalModel, pointLineCol, type LogicalPane, type LogicalWindowNode } from "./logical"
 import { layoutCharGrid, splitColBudget, splitLineBudget } from "./char-grid-layout"
 import { PIXEL_DISPLAY_LOCAL, pixelRowCounts, pixelWrapFor } from "./pixel-wrap"
+import { fitRightMargin } from "./right-margin"
 
 export type BuildDisplayOptions = {
   lastMessage?: string
@@ -94,7 +95,10 @@ function syncEditorWindowGeometry(
       if (isSelected || !published.has(pane.bufferId)) {
         published.add(pane.bufferId)
         const buffer = editor.buffers.get(pane.bufferId)
-        if (buffer) syncWindowBodyGeometry(editor, buffer, maxLines, cols ?? viewport.cols)
+        // Like Emacs `window-body-width`, the published width excludes the
+        // right margin, so visual-line motion and scroll costs wrap the same
+        // column the layout draws.
+        if (buffer) syncWindowBodyGeometry(editor, buffer, maxLines, textColsFor(pane, cols ?? viewport.cols))
       }
       if (isSelected) selected = { pane, maxLines, cols }
       return
@@ -104,6 +108,11 @@ function syncEditorWindowGeometry(
     walk(node.first, lb.first, cb.first)
     walk(node.second, lb.second, cb.second)
   }
+}
+
+function textColsFor(pane: LogicalPane, cols: number | undefined): number | undefined {
+  const margin = fitRightMargin(pane.rightMargin, cols)
+  return margin && cols != null ? cols - margin.width : cols
 }
 
 function footerLineCount(text: string | undefined, bodyAndFooterLines: number): number {
@@ -129,10 +138,12 @@ function selectedVisualRows(editor: Editor, pane: LogicalPane, maxLines: number,
   const cursorLine = pointLineCol(dText, dPoint).line - 1
   const displayLines = dText.split("\n")
   const lineRange = visualRowLineRange(pane.startLine, cursorLine, maxLines, displayLines.length)
+  // Match `layoutLeafPane`: a right margin narrows the wrap column.
+  const textCols = textColsFor(pane, cols)
   const wrapLayout = paneWrapLayoutFor(
     dText,
     pane.locals,
-    cols,
+    textCols,
     pane.showLineNumbers || Boolean(pane.gutterDecorations?.length),
     pane.startLine,
     maxLines,
@@ -158,7 +169,7 @@ function selectedVisualRows(editor: Editor, pane: LogicalPane, maxLines: number,
   const showGutter = pane.showLineNumbers || Boolean(pane.gutterDecorations?.length)
   const pixel = pixelWrapFor({
     locals: pane.locals,
-    cols,
+    cols: textCols,
     showGutter,
     perFaceFonts: true,
     metrics: hostCapabilities?.fontMetrics,

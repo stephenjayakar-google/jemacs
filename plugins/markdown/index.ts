@@ -6,7 +6,7 @@ import type { Editor } from "../../src/kernel/editor"
 import { addHook } from "../../src/kernel/hooks"
 import { Keymap } from "../../src/kernel/keymap"
 import { getTrackedAdvice } from "../../src/runtime/advice"
-import { defcustom, getCustom, setCustom } from "../../src/runtime/custom"
+import { defcustom, defvar, getCustom, setCustom } from "../../src/runtime/custom"
 import { defface, faceRemapAddRelative, FIXED_PITCH_FAMILY, VARIABLE_PITCH_FAMILY } from "../../src/runtime/faces"
 import { createPluginContext, type PluginContext } from "../../src/runtime/plugin-context"
 import { defineMode, enterMode, getMode, modeFeature, type FaceName, type FontLockRange, type TextSpan } from "../../src/modes/mode"
@@ -91,6 +91,8 @@ defcustom("markdown-open-command", "string", process.platform === "darwin" ? "op
 defcustom("markdown-indent-on-enter", "sexp", true, "RET behavior in markdown buffers: nil inserts a raw newline, t indents, and `indent-and-new-item` continues lists.", "text")
 defcustom("markdown-trim-trailing-whitespace-on-enter", "boolean", false, "Trim trailing whitespace from the previous line after RET.", "text")
 defcustom("word-wrap", "boolean", false, "Wrap display lines at word boundaries when soft wrapping.", "display")
+defvar("markdown-display-hide-functions", [] as MarkdownHideFn[],
+  "Functions returning extra display-layer hides for a markdown buffer, applied even without markup hiding.")
 
 const MARKDOWN_HIDE_MARKUP = "markdown-hide-markup"
 const MARKDOWN_HIDE_URLS = "markdown-hide-urls"
@@ -158,7 +160,11 @@ type DisplayFilterResult = {
   lineKinds?: Array<string | undefined>
   lineImages?: Array<InlineImage | undefined>
 }
-type MarkupOp = { start: number; end: number; display: string }
+/** Replace buffer range [start, end) with `display` in the display layer. */
+export type MarkupOp = { start: number; end: number; display: string }
+/** Return a stable (identity-cached) array for unchanged text so the display
+ *  filter cache stays warm. */
+export type MarkdownHideFn = (buffer: BufferModel) => readonly MarkupOp[]
 type LineRenderMap = {
   text: string
   bufToDisp: number[]
@@ -179,6 +185,7 @@ type DisplayFilterCache = {
   ruleWidth: number
   pixel: boolean
   images: string
+  extraHides: ReadonlyArray<readonly MarkupOp[]>
   result: DisplayFilterResult
 }
 export type MarkdownDeps = {
@@ -1044,11 +1051,26 @@ function renderLineWithMarkupMap(line: string, lineStart: number, ops: MarkupOp[
   return { text: out.join(""), bufToDisp, dispToBuf }
 }
 
+function markdownExtraHides(buffer: BufferModel): Array<readonly MarkupOp[]> {
+  const fns = getCustom<MarkdownHideFn[]>("markdown-display-hide-functions") ?? []
+  const out: Array<readonly MarkupOp[]> = []
+  for (const fn of fns) {
+    try {
+      const ops = fn(buffer)
+      if (ops.length) out.push(ops)
+    } catch (err) {
+      console.error("markdown-display-hide-functions entry threw:", err)
+    }
+  }
+  return out
+}
+
 export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult | null {
   const ranges = foldedRanges(buffer)
   const hideMarkup = markdownHideMarkup(buffer)
   const hideUrls = markdownHideUrls(buffer)
-  if (!ranges.length && !hideMarkup && !markdownPixelDisplay(buffer)) return null
+  const extraHides = markdownExtraHides(buffer)
+  if (!ranges.length && !hideMarkup && !extraHides.length && !markdownPixelDisplay(buffer)) return null
   const src = buffer.text
   // Emacs sizes the rule from `(1- (window-body-width))`, so it has to be part
   // of the cache key: a window resize changes the composed string.
@@ -1062,7 +1084,9 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     && cached.hideUrls === hideUrls
     && cached.ruleWidth === ruleWidth
     && cached.pixel === pixel
-    && cached.images === markdownImagesKey(buffer)) return cached.result
+    && cached.images === markdownImagesKey(buffer)
+    && cached.extraHides.length === extraHides.length
+    && cached.extraHides.every((ops, i) => ops === extraHides[i])) return cached.result
 
   const lines = src.split("\n")
   const L = lines.length
@@ -1072,7 +1096,8 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     for (let i = Math.max(0, a); i <= b && i < L; i++) foldHidden[i] = 1
 
   // (`parseFencedCodeBlocks` is no longer needed here: fence lines stay visible.)
-  const markupOps = hideMarkup ? collectMarkupHides(src, hideUrls, markdownIsGfmMode(buffer), ruleWidth, pixel) : []
+  const baseOps = hideMarkup ? collectMarkupHides(src, hideUrls, markdownIsGfmMode(buffer), ruleWidth, pixel) : []
+  const markupOps = extraHides.length ? mergeMarkupOps([...baseOps, ...extraHides.flat()]) : baseOps
   const sourceKinds = pixel ? markdownLineKinds(lines, fencedCodeBlocksFor(buffer)) : undefined
   const images = pixel && hideMarkup ? markdownInlineImages(buffer, lines, sourceKinds!) : undefined
   const lineKinds: Array<string | undefined> | undefined = pixel ? [] : undefined
@@ -1087,7 +1112,7 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
   const lineLen: number[] = new Array(L)
   for (let o = 0, i = 0; i < L; i++) { bufStart[i] = o; lineLen[i] = lines[i]!.length; o += lineLen[i]! + 1 }
   const opsByLine: MarkupOp[][] = Array.from({ length: L }, () => [])
-  if (hideMarkup && markupOps.length) {
+  if (markupOps.length) {
     let opIdx = 0
     for (let i = 0; i < L; i++) {
       const start = bufStart[i]!
@@ -1120,7 +1145,7 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     }
     if (dispLen > 0) { parts.push("\n"); dispLen += 1 }
     dispStart[i] = dispLen
-    const rendered = hideMarkup
+    const rendered = opsByLine[i]!.length
       ? renderLineWithMarkupMap(lines[i]!, bufStart[i]!, opsByLine[i]!)
       : null
     const renderedText = rendered?.text ?? lines[i]!
@@ -1152,7 +1177,6 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     const i = lo - 1
     if (foldHidden[i] || skipHidden[i]) return dispStart[i]! // 1 = invisible, 2 = paragraph break
     const col = nn - bufStart[i]!
-    if (!hideMarkup) return dispStart[i]! + Math.min(col, lineLen[i]!)
     const rendered = lineDisplayMaps[i]
     return dispStart[i]! + (rendered?.bufToDisp?.[Math.min(col, lineLen[i]!)] ?? Math.min(col, lineLen[i]!))
   }
@@ -1181,6 +1205,7 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
     hideMarkup,
     hideUrls,
     ruleWidth,
+    extraHides,
     result,
   } satisfies DisplayFilterCache)
   return result
