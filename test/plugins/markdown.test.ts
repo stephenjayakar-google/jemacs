@@ -25,6 +25,7 @@ import {
   parseFencedCodeBlocks,
   MARKDOWN_FOLDED_LOCAL,
 } from "../../plugins/markdown"
+import { FontMetricsTable } from "../../src/display/font-metrics"
 import { treeSitterFontLock } from "../../src/modes/tree-sitter"
 import { registerTreeSitterGrammars } from "../../plugins/tree-sitter-grammars"
 import type { SpawnHandle, SpawnOptions } from "../../src/platform/runtime"
@@ -1582,4 +1583,21 @@ describe("markdown inline images and live preview", () => {
     await editor.runHook("after-save-hook", buffer)
     expect(writes).toHaveLength(2)
   })
+})
+
+test("pixel markdown display keeps leading blank lines (C-o at start of buffer)", async () => {
+  const editor = makeEditor()
+  install(editor)
+  const buffer = editor.scratch("lead.md", "# Title\nbody\n", "markdown")
+  buffer.point = 0
+  const caps = { unit: "pixels" as const, mouse: true, clipboard: true, osc52: false, perFaceFonts: true, fontMetrics: new FontMetricsTable() }
+  buildDisplayModel(editor, { lastMessage: "", viewport: { rows: 20, cols: 40 }, hostCapabilities: caps })
+  await keySeq(editor, "C-o")
+  await keySeq(editor, "C-o")
+  expect(buffer.text).toBe("\n\n# Title\nbody\n")
+  const model = buildDisplayModel(editor, { lastMessage: "", viewport: { rows: 20, cols: 40 }, hostCapabilities: caps })
+  const pane = findPaneInModel(model.windows, editor.selectedWindowId)!
+  expect(themedTextPlain(pane.body).split("\n").slice(0, 3)).toEqual(["", "", "# Title"])
+  expect(pane.cursor).toEqual({ row: 0, colOffset: 0 })
+  expect(markdownDisplayFilter(buffer)?.map(2)).toBe(2)
 })

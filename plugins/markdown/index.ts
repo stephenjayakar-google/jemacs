@@ -1130,6 +1130,10 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
   const parts: string[] = []
   let dispLen = 0
   let lastVisibleEnd = 0
+  // A flag, not `dispLen > 0`: an empty first line adds no characters, and the
+  // length test then dropped its separator, collapsing leading blank lines (C-o
+  // at the start of the buffer drew nothing new in the GUI).
+  let anyVisible = false
   for (let i = 0; i < L; i++) {
     if (foldHidden[i] || skipHidden[i] === 1) { dispStart[i] = lastVisibleEnd; continue }
     if (skipHidden[i] === 2) {
@@ -1143,7 +1147,8 @@ export function markdownDisplayFilter(buffer: BufferModel): DisplayFilterResult 
       lastVisibleEnd = dispLen
       continue
     }
-    if (dispLen > 0) { parts.push("\n"); dispLen += 1 }
+    if (anyVisible) { parts.push("\n"); dispLen += 1 }
+    anyVisible = true
     dispStart[i] = dispLen
     const rendered = opsByLine[i]!.length
       ? renderLineWithMarkupMap(lines[i]!, bufStart[i]!, opsByLine[i]!)
