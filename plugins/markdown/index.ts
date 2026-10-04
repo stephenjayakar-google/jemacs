@@ -1892,7 +1892,12 @@ function installMarkdownCommands(editor: Editor, deps: MarkdownDeps): void {
       const [start, end] = buffer.lineBounds(lineBefore)
       const text = buffer.text.slice(start, end)
       const trimmed = text.replace(/\s+$/, "")
-      if (trimmed.length < text.length) buffer.replaceRange(start + trimmed.length, end, "")
+      if (trimmed.length >= text.length) return
+      // replaceRange moves point to the edit; keep point where RET left it.
+      const point = buffer.point
+      const removed = text.length - trimmed.length
+      buffer.replaceRange(start + trimmed.length, end, "")
+      buffer.point = point >= end ? point - removed : Math.min(point, start + trimmed.length)
     }
     const line = buffer.lineBoundsAt()
     const emptyList = markdownEmptyListItem(line.text)

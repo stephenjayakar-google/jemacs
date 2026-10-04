@@ -332,6 +332,28 @@ describe("markdown list item parity", () => {
     expect(buffer.text).toBe("- alpha beta\n- ")
   })
 
+  test("RET after trailing whitespace keeps point on the new list item", async () => {
+    const beforeIndent = getCustom<boolean | string>("markdown-indent-on-enter")
+    const beforeTrim = getCustom<boolean>("markdown-trim-trailing-whitespace-on-enter")
+    setCustom("markdown-indent-on-enter", "indent-and-new-item")
+    setCustom("markdown-trim-trailing-whitespace-on-enter", true)
+    try {
+      const editor = makeEditor()
+      install(editor)
+      for (const [input, expected] of [["- foo ", "- foo\n- "], ["1. a ", "1. a\n2. "], ["plain ", "plain\n"]] as const) {
+        const buffer = editor.scratch("doc.md", input, "markdown")
+        buffer.point = buffer.text.length
+        await editor.run("markdown-enter-key")
+        expect(buffer.text).toBe(expected)
+        expect(buffer.point).toBe(expected.length)
+      }
+    } finally {
+      setCustom("markdown-indent-on-enter", beforeIndent ?? true)
+      setCustom("markdown-trim-trailing-whitespace-on-enter", beforeTrim ?? false)
+    }
+  })
+
+
   test("RET continues non-empty lists when markdown-indent-on-enter is indent-and-new-item", async () => {
     const before = getCustom<boolean | string>("markdown-indent-on-enter")
     setCustom("markdown-indent-on-enter", "indent-and-new-item")
