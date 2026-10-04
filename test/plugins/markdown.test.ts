@@ -332,6 +332,19 @@ describe("markdown list item parity", () => {
     expect(buffer.text).toBe("- alpha beta\n- ")
   })
 
+  test("RET at the start of a buffer does not hang", async () => {
+    const editor = makeEditor()
+    install(editor)
+    for (const input of ["", "plain", "\n\nx"]) {
+      const buffer = editor.scratch("doc.md", input, "markdown")
+      buffer.point = 0
+      await editor.run("markdown-enter-key")
+      expect(buffer.text.endsWith(input)).toBe(true)
+      expect(buffer.text[0]).toBe("\n")
+    }
+  })
+
+
   test("RET after trailing whitespace keeps point on the new list item", async () => {
     const beforeIndent = getCustom<boolean | string>("markdown-indent-on-enter")
     const beforeTrim = getCustom<boolean>("markdown-trim-trailing-whitespace-on-enter")

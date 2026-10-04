@@ -3825,6 +3825,9 @@ function isBlankLine(text: string, offset: number): boolean {
 
 function previousLineStart(text: string, lineStart: number): number | null {
   if (lineStart <= 0) return null
+  // lastIndexOf clamps a negative fromIndex to 0. For lineStart 1 it would find
+  // the newline at 0 and return 1 again, so loops that walk upward never end.
+  if (lineStart === 1) return 0
   return text.lastIndexOf("\n", lineStart - 2) + 1
 }
 
