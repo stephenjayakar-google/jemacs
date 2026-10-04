@@ -1012,6 +1012,20 @@ describe("markdown list and checkbox commands", () => {
 
     expect(buffer.text).toBe("1. one\n2. \n3. two\n4. three\n")
   })
+
+  test("TAB and S-TAB on an ordered item renumber both lists", async () => {
+    const editor = makeEditor()
+    install(editor)
+    const buffer = editor.scratch("list.md", "1. a\n2. b\n3. c\n4. d\n5. e\n", "markdown")
+    buffer.point = buffer.text.indexOf("d")
+
+    await editor.run("markdown-cycle")
+    expect(buffer.text).toBe("1. a\n2. b\n3. c\n    1. d\n4. e\n")
+    expect(buffer.text.slice(buffer.point, buffer.point + 1)).toBe("d")
+
+    await editor.run("markdown-shifttab")
+    expect(buffer.text).toBe("1. a\n2. b\n3. c\n4. d\n5. e\n")
+  })
 })
 
 describe("markdownDisplayFilter", () => {

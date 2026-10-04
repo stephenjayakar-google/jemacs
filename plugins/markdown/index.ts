@@ -1353,6 +1353,7 @@ function markdownShiftListItem(buffer: BufferModel, delta: -1 | 1): boolean {
   const shift = delta > 0 ? TAB_WIDTH : -Math.min(TAB_WIDTH, item.indent)
   indentRegion(buffer, range.start, Math.max(range.start, range.end - 1), shift)
   buffer.point = buffer.lineBounds(item.line)[0] + Math.max(0, column + shift)
+  renumberAfterListShift(buffer, item.line, item.indent, item.indent + shift)
   return true
 }
 
@@ -2862,6 +2863,45 @@ function markdownCleanupListNumbers(buffer: BufferModel): MarkdownEditResult {
   return { changed: true, message: "Cleaned up list numbers" }
 }
 
+/**
+ * Find an ordered item at `indent` in the same list as `lineNumber`, searching
+ * up (`step` -1) or down (`step` 1). Deeper lines are children and are skipped.
+ */
+function orderedSiblingLine(lines: string[], lineNumber: number, indent: number, step: -1 | 1): number | null {
+  for (let i = lineNumber + step; i >= 0 && i < lines.length; i += step) {
+    const line = lines[i]!
+    if (!line.trim()) return null
+    const list = line.match(LIST_RE)
+    const lineIndent = list ? list[1]!.length : line.match(/^\s*/)![0].length
+    if (lineIndent < indent || (!list && lineIndent === indent)) return null
+    if (list && lineIndent === indent) return ORDERED_LIST_RE.test(line) ? i : null
+  }
+  return null
+}
+
+/**
+ * After TAB / S-TAB moves an item, renumber the list it left and the list it
+ * joined. An item that becomes the first child starts at 1, as Obsidian does.
+ */
+function renumberAfterListShift(buffer: BufferModel, lineNumber: number, oldIndent: number, newIndent: number): void {
+  if (oldIndent === newIndent) return
+  let lines = buffer.text.split("\n")
+  const ordered = lines[lineNumber]?.match(ORDERED_LIST_RE)
+  if (ordered && orderedSiblingLine(lines, lineNumber, newIndent, -1) == null && ordered[2] !== "1") {
+    const point = buffer.point
+    const [start] = buffer.lineBounds(lineNumber)
+    const numStart = start + ordered[1]!.length
+    buffer.replaceRange(numStart, numStart + ordered[2]!.length, "1")
+    buffer.point = point > numStart ? point - (ordered[2]!.length - 1) : point
+    lines = buffer.text.split("\n")
+  }
+  for (const step of [-1, 1] as const) {
+    const sibling = orderedSiblingLine(lines, lineNumber, oldIndent, step)
+    if (sibling != null) renumberOrderedListContainingLine(buffer, sibling, oldIndent)
+  }
+  if (ordered) renumberOrderedListContainingLine(buffer, lineNumber, newIndent)
+}
+
 function renumberOrderedListContainingLine(buffer: BufferModel, lineNumber: number, targetIndent: number): void {
   const lines = buffer.text.split("\n")
   if (!lines[lineNumber]?.match(ORDERED_LIST_RE)) return
@@ -3338,7 +3378,10 @@ function markdownPromoteOrDemoteListItem(buffer: BufferModel, delta: -1 | 1): Ma
   const item = currentMarkdownListItem(buffer.text, buffer.point)
   if (!item) return { changed: false, message: "No list item at point" }
   const range = lineRangeTextBounds(buffer, item.line, item.endLine)
+  const oldIndent = buffer.text.split("\n")[item.line]!.match(/^ */)![0].length
   indentRegion(buffer, range.start, Math.max(range.start, range.end - 1), delta > 0 ? TAB_WIDTH : -TAB_WIDTH)
+  const newIndent = buffer.text.split("\n")[item.line]!.match(/^ */)![0].length
+  renumberAfterListShift(buffer, item.line, oldIndent, newIndent)
   buffer.point = lineStartAt(buffer.text, item.line)
   return { changed: true, message: delta > 0 ? "Demoted list item" : "Promoted list item" }
 }
