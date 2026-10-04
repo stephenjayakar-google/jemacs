@@ -1097,6 +1097,19 @@ describe("markdown mouse clicks", () => {
     expect(buffer.text).toBe("- [x] task\n- [x] done\n")
   })
 
+  test("clicking a link opens its url", () => {
+    const editor = makeEditor()
+    const opened: string[] = []
+    install(editor, { openExternal: url => { opened.push(url) } })
+    const buffer = editor.scratch("doc.md", "see [here](https://example.com) now\n", "markdown")
+
+    editor.clickWindow(editor.selectedWindowId, buffer.text.indexOf("here") + 1)
+    expect(opened).toEqual(["https://example.com"])
+
+    editor.clickWindow(editor.selectedWindowId, buffer.text.indexOf("now"))
+    expect(opened).toEqual(["https://example.com"])
+  })
+
   test("click hit-testing accounts for hidden markup and centered visual fill", () => {
     const editor = makeEditor()
     install(editor)

@@ -1689,6 +1689,23 @@ function markdownToggleCheckboxAtPoint(buffer: BufferModel, point: number): bool
   return markdownToggleCheckbox(buffer, point, true).changed
 }
 
+// mouse-1 on a link follows it, as markdown-mode does with its default
+// `markdown-mouse-follow-link`. The end bound is exclusive so a click just past
+// the closing `)` only moves point.
+function markdownMouseClick(buffer: BufferModel, point: number, deps: MarkdownDeps): boolean {
+  if (markdownToggleCheckboxAtPoint(buffer, point)) return true
+  const link = linkAtPoint(buffer.text, point, markdownIsGfmMode(buffer))
+  if (!link || point >= link.end) return false
+  if (link.kind === "reference") {
+    if (link.definitionStart == null) return false
+    buffer.point = link.definitionStart
+    return true
+  }
+  if (!link.url) return false
+  markdownOpenExternal(link.url, deps)
+  return true
+}
+
 function markdownToggleCheckbox(buffer: BufferModel, point: number, requireCheckboxHit = false): MarkdownEditResult {
   const clamped = Math.max(0, Math.min(point, buffer.text.length))
   const lineStart = buffer.text.lastIndexOf("\n", Math.max(0, clamped - 1)) + 1
@@ -2609,7 +2626,7 @@ export function install(editor: Editor, depsOrCtx: MarkdownDeps | PluginContext 
     indentLine: markdownIndentLine,
     fontLock: markdownFontLock,
     displayFilter: markdownDisplayFilter,
-    mouseClick: markdownToggleCheckboxAtPoint,
+    mouseClick: (buffer, point) => markdownMouseClick(buffer, point, deps),
     onEnter: applyMarkdownFaceRemap,
   })
 
