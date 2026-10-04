@@ -1,5 +1,5 @@
 import { applyTheme } from "../../src/display/theme"
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { BufferModel } from "../../src/kernel/buffer"
 import { buildDisplayModel } from "../../src/display/build-display-model"
 import { pointFromWindowClick } from "../../src/display/click-to-point"
@@ -29,6 +29,19 @@ import { FontMetricsTable } from "../../src/display/font-metrics"
 import { treeSitterFontLock } from "../../src/modes/tree-sitter"
 import { registerTreeSitterGrammars } from "../../plugins/tree-sitter-grammars"
 import type { SpawnHandle, SpawnOptions } from "../../src/platform/runtime"
+
+// The plugin defaults hide markup and URLs (WYSIWYG notes). The display tests
+// below compare against stock markdown-mode, where both are nil, so pin the
+// stock values here. Tests that need hiding set the buffer-local.
+const STOCK_HIDE_CUSTOMS = ["markdown-hide-markup", "markdown-hide-urls"] as const
+let savedHideCustoms: unknown[] = []
+beforeEach(() => {
+  savedHideCustoms = STOCK_HIDE_CUSTOMS.map(name => getCustom(name))
+  for (const name of STOCK_HIDE_CUSTOMS) setCustom(name, false)
+})
+afterEach(() => {
+  STOCK_HIDE_CUSTOMS.forEach((name, i) => setCustom(name, savedHideCustoms[i]))
+})
 
 registerTreeSitterGrammars()
 
@@ -536,11 +549,15 @@ test("markdown-mode onEnter applies proportional default face remap", () => {
   install(editor)
   const buffer = new BufferModel({ name: "doc.md", text: "# Title", mode: "text" })
   enterMode(buffer, "markdown")
-  // `(face-remap-add-relative 'default :family "Helvetica Neue" :height 200)`.
-  // `font-at` on body prose in the live Emacs reports Helvetica Neue at size 20;
-  // 200 is Emacs `:height`, i.e. tenths of a point.
-  expect(getBufferFaceRemap(buffer, "default")?.family).toContain("Helvetica Neue")
-  expect(getBufferFaceRemap(buffer, "default")?.height).toBe(200)
+  // Like `(face-remap-add-relative 'default :family ... :height 170)`: the
+  // system UI font at 17pt. `:height` is tenths of a point.
+  expect(getBufferFaceRemap(buffer, "default")?.family).toContain("system-ui")
+  expect(getBufferFaceRemap(buffer, "default")?.height).toBe(170)
+  // Obsidian Minimal gruvbox: cream body, colored headings, emphasis stays italic.
+  expect(getBufferFaceRemap(buffer, "default")?.fg).toBe("#fbf1c7")
+  expect(getBufferFaceRemap(buffer, "markdown-header-face-1")?.fg).toBe("#cc241d")
+  expect(getBufferFaceRemap(buffer, "markdown-header-face-6")?.fg).toBe("#b16286")
+  expect(getBufferFaceRemap(buffer, "markdown-emphasis")?.italic).toBe(true)
   // Emacs remaps only `default`. `markdown-code-face` and friends declare no
   // `:family`, so code inherits the proportional body font -- `font-at` inside
   // a fenced block reports Helvetica Neue, not Menlo.
@@ -1677,4 +1694,34 @@ test("pixel markdown display keeps leading blank lines (C-o at start of buffer)"
   expect(themedTextPlain(pane.body).split("\n").slice(0, 3)).toEqual(["", "", "# Title"])
   expect(pane.cursor).toEqual({ row: 0, colOffset: 0 })
   expect(markdownDisplayFilter(buffer)?.map(2)).toBe(2)
+})
+
+test("modified markdown buffers save to their files after markdown-auto-save-idle-seconds", async () => {
+  const { mkdtempSync, readFileSync, writeFileSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const before = getCustom<number>("markdown-auto-save-idle-seconds")
+  setCustom("markdown-auto-save-idle-seconds", 0.2)
+  const editor = makeEditor()
+  const ctx = (await import("../../src/runtime/plugin-context")).createPluginContext(editor)
+  try {
+    install(editor, ctx)
+    const dir = mkdtempSync(join(tmpdir(), "md-idle-"))
+    const note = join(dir, "note.md")
+    const other = join(dir, "note.txt")
+    writeFileSync(note, "a\n")
+    writeFileSync(other, "a\n")
+    const md = await editor.openFile(note)
+    const txt = await editor.openFile(other)
+    md.insert("b")
+    txt.insert("b")
+    await new Promise(resolve => setTimeout(resolve, 900))
+    expect(readFileSync(note, "utf8")).toBe(md.text)
+    expect(md.dirty).toBe(false)
+    // Only markdown and gfm buffers save on idle.
+    expect(readFileSync(other, "utf8")).toBe("a\n")
+  } finally {
+    ctx.dispose()
+    setCustom("markdown-auto-save-idle-seconds", before ?? 2)
+  }
 })

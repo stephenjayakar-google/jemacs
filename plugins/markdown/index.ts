@@ -14,6 +14,7 @@ import { registeredTreeSitterLanguages, treeSitterFontLock } from "../../src/mod
 import { spawnProcess, writeFileText, type SpawnHandle, type SpawnOptions } from "../../src/platform/runtime"
 import { registerTreeSitterGrammars } from "../tree-sitter-grammars"
 import { PIXEL_DISPLAY_LOCAL } from "../../src/display/pixel-wrap"
+import { saveContextOptions } from "../../src/core/save-context"
 import { findInlineImage, type InlineImage } from "./inline-images"
 
 const TAB_WIDTH = 4
@@ -53,20 +54,29 @@ const MARKDOWN_FOOTNOTE_RETURN_POINT = "markdown-footnote-return-point"
 const MARKDOWN_DEFAULT_RULE_WIDTH = 79
 
 defcustom("markdown-fill-column", "integer", 100, "Soft-wrap width for markdown buffers (Stephen's Notion-style layout).", "text")
-// `(face-remap-add-relative 'default :family "Helvetica Neue" :height 200)` in
-// my-markdown-mode-hook. Emacs `:height` is tenths of a point, so 200 is 20pt:
-// `font-at` on body prose reports `Helvetica Neue` at size 20, and the H1 at
-// 2.0x reports 40. Customizable so a machine without Helvetica Neue can pick a
-// different prose font without editing the plugin.
+// Obsidian's prose font on macOS is the system UI font (SF Pro). Emacs `:height` is
+// tenths of a point, so 170 is 17pt, which keeps the 100-column measure near 850px,
+// the width Obsidian and Notion use for prose.
 defcustom("markdown-body-font-family", "string",
-  "\"Helvetica Neue\", system-ui, -apple-system, \"Segoe UI\", Arial, sans-serif",
+  "system-ui, -apple-system, \"Helvetica Neue\", \"Segoe UI\", Arial, sans-serif",
   "Font family for the markdown body, remapped onto `default`.", "text")
-defcustom("markdown-body-font-height", "integer", 200,
+defcustom("markdown-body-font-height", "integer", 170,
   "Markdown body font height, in tenths of a point (Emacs `:height`).", "text")
 defcustom("markdown-visual-fill-column-center-text", "boolean", true, "Center body text within the fill column.", "text")
-defcustom("markdown-fontify-code-blocks-natively", "boolean", false, "Fontify fenced code blocks using the language major mode.", "text")
-defcustom("markdown-indent-on-enter", "string", "indent-and-new-item", "Behavior of RET in markdown mode.", "text")
-defcustom("markdown-trim-trailing-whitespace-on-enter", "boolean", true, "Trim trailing whitespace on RET in markdown mode.", "text")
+// Obsidian's Minimal theme (`minimal-gruvbox-dark`, "colorful headings"): gruvbox
+// red, orange, yellow, green, blue, purple for h1..h6, and cream (`tx1`) body text.
+// Buffer-local remaps, so they apply in markdown buffers only and win over the theme.
+defcustom("markdown-header-colors", "sexp", ["#cc241d", "#d65d0e", "#d79921", "#98971a", "#458588", "#b16286"],
+  "Foreground colors for markdown header levels 1 to 6. nil keeps the theme colors.", "text")
+defcustom("markdown-body-foreground", "string", "#fbf1c7",
+  "Foreground color for markdown body text. Empty keeps the theme color.", "text")
+defcustom("markdown-fontify-code-blocks-natively", "boolean", true, "Fontify fenced code blocks using the language major mode.", "text")
+defcustom("markdown-indent-on-enter", "sexp", "indent-and-new-item", "RET behavior in markdown buffers: nil inserts a raw newline, t indents, and `indent-and-new-item` continues lists.", "text")
+defcustom("markdown-trim-trailing-whitespace-on-enter", "boolean", true, "Trim trailing whitespace from the previous line after RET.", "text")
+// Like a notes app: Emacs `auto-save-visited-mode` with a markdown-only
+// `auto-save-visited-predicate`, but on an idle delay instead of a fixed period.
+defcustom("markdown-auto-save-idle-seconds", "integer", 2,
+  "Seconds without input before modified markdown buffers save to their files. 0 disables.", "text")
 defcustom("markdown-fontify-code-block-default-mode", "string", "", "Default mode for fenced blocks with no language (empty = none).", "text")
 defcustom("markdown-code-lang-modes", "sexp", [
   ["cpp", "c"],
@@ -83,13 +93,11 @@ defcustom("markdown-gfm-use-electric-backquote", "boolean", true, "When non-nil,
 defcustom("markdown-wiki-link-search-subdirectories", "boolean", false, "When non-nil, search for wiki link targets in subdirectories.", "text")
 defcustom("markdown-display-inline-images", "boolean", true, "Replace image links with inline placeholders in the display layer.", "text")
 defcustom("markdown-display-remote-images", "boolean", true, "Allow remote image URLs in inline image display.", "text")
-defcustom("markdown-hide-markup", "boolean", false, "Hide markup delimiters in the display layer (WYSIWYG-style editing).", "text")
-defcustom("markdown-hide-urls", "boolean", false, "Compose link URLs to a single glyph when markup hiding is active.", "text")
+defcustom("markdown-hide-markup", "boolean", true, "Hide markup delimiters in the display layer (WYSIWYG-style editing).", "text")
+defcustom("markdown-hide-urls", "boolean", true, "Compose link URLs to a single glyph when markup hiding is active.", "text")
 defcustom("markdown-hide-markup-in-view-modes", "boolean", true, "Enable hidden markup in markdown-view-mode and gfm-view-mode.", "text")
 defcustom("markdown-command", "string", "markdown", "External Markdown processor used by `markdown-export`.", "text")
 defcustom("markdown-open-command", "string", process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open", "External command used by `markdown-open`.", "text")
-defcustom("markdown-indent-on-enter", "sexp", true, "RET behavior in markdown buffers: nil inserts a raw newline, t indents, and `indent-and-new-item` continues lists.", "text")
-defcustom("markdown-trim-trailing-whitespace-on-enter", "boolean", false, "Trim trailing whitespace from the previous line after RET.", "text")
 defcustom("word-wrap", "boolean", false, "Wrap display lines at word boundaries when soft wrapping.", "display")
 defvar("markdown-display-hide-functions", [] as MarkdownHideFn[],
   "Functions returning extra display-layer hides for a markdown buffer, applied even without markup hiding.")
@@ -198,7 +206,7 @@ export type MarkdownDeps = {
 function markdownHideMarkup(buffer: BufferModel): boolean {
   const local = buffer.locals.get(MARKDOWN_HIDE_MARKUP)
   if (typeof local === "boolean") return local
-  return getCustom<boolean>("markdown-hide-markup") ?? false
+  return getCustom<boolean>("markdown-hide-markup") ?? true
 }
 
 /**
@@ -305,7 +313,7 @@ function markdownLineKinds(lines: readonly string[], blocks: readonly FencedCode
 function markdownHideUrls(buffer: BufferModel): boolean {
   const local = buffer.locals.get(MARKDOWN_HIDE_URLS)
   if (typeof local === "boolean") return local
-  return getCustom<boolean>("markdown-hide-urls") ?? false
+  return getCustom<boolean>("markdown-hide-urls") ?? true
 }
 
 /**
@@ -339,7 +347,7 @@ function setMarkdownHideUrls(buffer: BufferModel, value: boolean): void {
 function markdownFontifyCodeBlocksNatively(buffer: BufferModel): boolean {
   const local = buffer.locals.get(MARKDOWN_FONTIFY_CODE_BLOCKS)
   if (typeof local === "boolean") return local
-  return getCustom<boolean>("markdown-fontify-code-blocks-natively") ?? false
+  return getCustom<boolean>("markdown-fontify-code-blocks-natively") ?? true
 }
 
 function setMarkdownFontifyCodeBlocksNatively(buffer: BufferModel, value: boolean): void {
@@ -1630,10 +1638,16 @@ function applyMarkdownFaceRemap(buffer: BufferModel): void {
   // the height off kept the body at the 14pt code default while Emacs rendered
   // 20pt, so every glyph was ~30% too small and the header scales multiplied
   // the wrong base.
+  const fg = getCustom<string>("markdown-body-foreground")
   faceRemapAddRelative(buffer, "default", {
     family: getCustom<string>("markdown-body-font-family") || VARIABLE_PITCH_FAMILY,
-    height: getCustom<number>("markdown-body-font-height") ?? 200,
+    height: getCustom<number>("markdown-body-font-height") ?? 170,
+    ...(fg ? { fg } : {}),
   })
+  // `_x_` / `*x*` has no visual except italics, so keep emphasis italic even when
+  // the user turns italics off for every face. A buffer-local remap wins over a
+  // customized face attribute.
+  faceRemapAddRelative(buffer, "markdown-emphasis", { italic: true })
   // Emacs remaps only `default` (to Helvetica Neue) in `my-markdown-mode-hook`.
   // `markdown-code-face` / `markdown-inline-code-face` / `markdown-markup-face`
   // declare no `:family`, so in the real GUI code and markup inherit the
@@ -1644,9 +1658,11 @@ function applyMarkdownFaceRemap(buffer: BufferModel): void {
   // across two fonts: tree-sitter emits an `emphasis_delimiter` per `*`, so the
   // opening `**` of a bold span rendered one sans `*` next to one mono `*`.
   // Keeping one family for the whole buffer matches Emacs and removes the seam.
-  for (const [face, scale] of MARKDOWN_HEADER_FACES) {
-    faceRemapAddRelative(buffer, face, { heightScale: scale })
-  }
+  const headerColors = getCustom<string[]>("markdown-header-colors") ?? []
+  MARKDOWN_HEADER_FACES.forEach(([face, scale], i) => {
+    const color = headerColors[i]
+    faceRemapAddRelative(buffer, face, color ? { heightScale: scale, fg: color } : { heightScale: scale })
+  })
   // `(display-line-numbers-mode 0)` in my-markdown-mode-hook. Both linum minor
   // modes are `global: true`, so dropping the buffer's own entry never turned
   // the gutter off -- the buffer-local opt-out is what Emacs actually sets.
@@ -1888,10 +1904,10 @@ let gfmBackquoteAdviceId: string | undefined
 function installMarkdownCommands(editor: Editor, deps: MarkdownDeps): void {
   editor.command("markdown-enter-key", ({ buffer, editor }) => {
     trackIndentCommand(buffer, "markdown-enter-key")
-    const indentOnEnter = getCustom<boolean | string>("markdown-indent-on-enter") ?? true
+    const indentOnEnter = getCustom<boolean | string>("markdown-indent-on-enter") ?? "indent-and-new-item"
     const lineBefore = buffer.lineAt(buffer.point)
     const trimPreviousLine = () => {
-      if (!(getCustom<boolean>("markdown-trim-trailing-whitespace-on-enter") ?? false)) return
+      if (!(getCustom<boolean>("markdown-trim-trailing-whitespace-on-enter") ?? true)) return
       const [start, end] = buffer.lineBounds(lineBefore)
       const text = buffer.text.slice(start, end)
       const trimmed = text.replace(/\s+$/, "")
@@ -2580,6 +2596,29 @@ function isPluginContext(value: MarkdownDeps | PluginContext | undefined): value
   return typeof value === "object" && value !== null && "advice" in value && "command" in value
 }
 
+/**
+ * Save modified markdown buffers to their visited files once input stops for
+ * `markdown-auto-save-idle-seconds`. The timer and hook go through `ctx`, so a
+ * reload replaces them instead of adding a second copy.
+ */
+function installMarkdownIdleAutoSave(editor: Editor, ctx: PluginContext): void {
+  let lastInput = Date.now()
+  ctx.hook("post-command-hook", () => { lastInput = Date.now() })
+  const timer = setInterval(() => {
+    const seconds = getCustom<number>("markdown-auto-save-idle-seconds") ?? 2
+    if (seconds <= 0 || Date.now() - lastInput < seconds * 1000) return
+    if (editor.minibuffer) return
+    for (const buffer of editor.buffers.values()) {
+      if (!buffer.dirty || !buffer.path) continue
+      if (buffer.mode !== "markdown" && buffer.mode !== "gfm") continue
+      // Silent on failure: an idle save must never interrupt typing. C-x C-s still reports.
+      void buffer.save(saveContextOptions()).catch(() => {})
+    }
+  }, 500)
+  ;(timer as { unref?: () => void }).unref?.()
+  ctx.onDispose(() => clearInterval(timer))
+}
+
 export function install(editor: Editor, ctx: PluginContext): void
 export function install(editor: Editor, deps?: MarkdownDeps, ctx?: PluginContext): void
 export function install(editor: Editor, depsOrCtx: MarkdownDeps | PluginContext = {}, maybeCtx?: PluginContext): void {
@@ -2597,6 +2636,7 @@ export function install(editor: Editor, depsOrCtx: MarkdownDeps | PluginContext 
     })
     ctx.onDispose(() => { gfmBackquoteAdviceId = undefined })
   }
+  installMarkdownIdleAutoSave(editor, ctx)
 
   // Headers are bold as well as scaled: at 1.0-1.2x, scale alone does not read
   // as a heading in a proportional font.
