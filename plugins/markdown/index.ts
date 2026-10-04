@@ -1738,6 +1738,8 @@ function bindMarkdownModeMap(keymap: Keymap): void {
   keymap.bind("C-c >", "markdown-indent-region")
   keymap.bind("C-c <", "markdown-outdent-region")
   keymap.bind("C-c C-l", "markdown-insert-link")
+  // Cmd-K is the link shortcut in most macOS editors (Typora, Obsidian, GitHub).
+  keymap.bind("s-k", "markdown-insert-link")
   keymap.bind("C-c C-k", "markdown-kill-thing-at-point")
   keymap.bind("C-c C-d", "markdown-do")
   keymap.bind("C-c C-c e", "markdown-export")

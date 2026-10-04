@@ -1349,6 +1349,21 @@ describe("markdown-insert-link", () => {
     expect(buffer.text).toBe("[read](https://example.com) more\n")
     expect(buffer.markActive).toBe(false)
   })
+
+  test("s-k wraps the active region in a link", async () => {
+    const editor = makeEditor()
+    install(editor)
+    const buffer = editor.scratch("doc.md", "read more\n", "markdown")
+    buffer.point = 0
+    buffer.setMark()
+    buffer.point = 4
+    editor.prompt = async () => "https://example.com"
+
+    // parseKey in the harness has no super modifier, so feed the raw event.
+    await keySeq(editor, { name: "k", sequence: "k", super: true })
+
+    expect(buffer.text).toBe("[read](https://example.com) more\n")
+  })
 })
 
 describe("markdown-insert-gfm-code-block", () => {
